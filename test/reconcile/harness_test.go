@@ -184,7 +184,8 @@ func (h *harness) waitForReady(within time.Duration) {
 }
 
 // newRegistry builds external-dns's real webhook client and TXT registry
-// pointed at the running binary, with talos-cluster's registry settings.
+// pointed at the running binary, with the consuming cluster's registry
+// settings.
 func newRegistry(t *testing.T, webhookURL string) registry.Registry {
 	t.Helper()
 	cfg := externaldns.NewConfig()

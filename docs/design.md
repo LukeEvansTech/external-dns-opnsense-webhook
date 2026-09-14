@@ -251,10 +251,10 @@ Algorithm:
 - **5. Deletes never cascade silently.** `delHostOverride` deletes the row's
   aliases with it, so a row with any enabled `_children` is never deleted by
   the provider: that endpoint fails with `ErrAliasChildren`,
-  `opnsense_delete_blocked_total` increments, and the operator re-homes or
-  removes the alias by hand. v1 creates no aliases, so every child is
-  hand-made. A target change on such a row uses `setHostOverride`, which keeps
-  the uuid and its children.
+  `externaldns_webhook_opnsense_delete_blocked_total` increments, and the
+  operator re-homes or removes the alias by hand. v1 creates no aliases, so
+  every child is hand-made. A target change on such a row uses
+  `setHostOverride`, which keeps the uuid and its children.
 - **6. Response decoding.** Every write is decoded as
   `{"result": string, "uuid": string, "validations": map[string]StringOrList}`
   where `StringOrList` accepts a string or an array of strings (the base
@@ -271,7 +271,8 @@ Algorithm:
   `{"status":"ok"}`, and only then clears `pending`. `Records()` checks
   `pending` first and runs the same reconfigure before reading, so an empty
   next plan still repairs the running service. Write errors and reconfigure
-  errors are both returned. `opnsense_pending_reconfigure` is a gauge.
+  errors are both returned. `externaldns_webhook_opnsense_pending_reconfigure`
+  is a gauge.
 - **8. Restart recovery.** `pending` lives in memory. At startup, after the
   listeners are up, the provider runs a served-state check: it fetches
   `diagnostics/listlocaldata` once and compares the enabled rows carrying the
@@ -307,11 +308,12 @@ Algorithm:
 
 - Lower-case names, trim trailing dots, clamp TTL as in 6.3.
 - Drop endpoints the provider cannot write, with a WARN and
-  `opnsense_endpoints_dropped_total{reason}`, so external-dns never loops on
-  them. The reason set is fixed: `type` (not A/AAAA/TXT), `wildcard`,
-  `set-identifier` (the provider has no set identifiers), `apex` (name equals a
-  configured domain), `domain` (outside `OPNSENSE_DOMAINS`), `name` (any other
-  split failure), `txt` (a source TXT target failing the TXT rule below).
+  `externaldns_webhook_opnsense_endpoints_dropped_total{reason}`, so
+  external-dns never loops on them. The reason set is fixed: `type` (not
+  A/AAAA/TXT), `wildcard`, `set-identifier` (the provider has no set
+  identifiers), `apex` (name equals a configured domain), `domain` (outside
+  `OPNSENSE_DOMAINS`), `name` (any other split failure), `txt` (a source TXT
+  target failing the TXT rule below).
 - TXT rule (applied here for source TXT endpoints and again in 6.2 step 3 for
   registry rows, which do not pass through this call): exactly one pair of
   surrounding double quotes, a single character-string (no `"a" "b"`
@@ -319,7 +321,8 @@ Algorithm:
   bytes after stripping (the model's `txtdata` limit and RFC 1035's
   character-string limit coincide because the content is ASCII). Violations
   fail the endpoint with an error naming the length and the record, and
-  increment `opnsense_txt_invalid_total`; nothing is truncated.
+  increment `externaldns_webhook_opnsense_txt_invalid_total`; nothing is
+  truncated.
 
 ## 7. Client and transport
 
@@ -348,14 +351,24 @@ Algorithm:
 - `/readyz`: cached (`READINESS_CACHE_TTL`), single-flighted, context-detached
   probe that fetches page 1 of `searchHostOverride` with `rowCount: 1`. 503
   `not ready` with the cause logged once per probe.
-- `/metrics`: `externaldns_webhook_*` as in UniFi with `provider="opnsense"`,
-  plus `opnsense_api_requests_total{operation,status}`,
-  `opnsense_api_duration_seconds{operation}`, `opnsense_pages_fetched_total`,
-  `opnsense_read_restarts_total`, `opnsense_rows_total` (gauge from the last
-  accepted snapshot), `opnsense_reconfigure_total{result}`,
-  `opnsense_pending_reconfigure` (gauge), `opnsense_apply_duration_seconds`,
-  `opnsense_delete_blocked_total`, `opnsense_endpoints_dropped_total{reason}`,
-  `opnsense_txt_invalid_total`.
+- `/metrics`: every metric is registered under the `externaldns_webhook`
+  namespace and carries `provider="opnsense"`. Alongside the HTTP, record and
+  change metrics inherited from UniFi:
+  `externaldns_webhook_opnsense_api_errors_total{operation}`,
+  `externaldns_webhook_opnsense_api_duration_seconds{operation}`,
+  `externaldns_webhook_opnsense_api_response_size_bytes{operation}`,
+  `externaldns_webhook_opnsense_api_retries_total{operation,status}`,
+  `externaldns_webhook_opnsense_api_rate_limits_total{operation}`,
+  `externaldns_webhook_opnsense_pages_fetched_total`,
+  `externaldns_webhook_opnsense_read_restarts_total`,
+  `externaldns_webhook_opnsense_rows` (gauge from the last accepted snapshot),
+  `externaldns_webhook_opnsense_reconfigure_total{result}`,
+  `externaldns_webhook_opnsense_pending_reconfigure` (gauge),
+  `externaldns_webhook_opnsense_apply_duration_seconds`,
+  `externaldns_webhook_opnsense_delete_blocked_total`,
+  `externaldns_webhook_opnsense_endpoints_dropped_total{reason}`,
+  `externaldns_webhook_opnsense_txt_invalid_total`. `README.md` lists the whole
+  set with its labels.
 - Logs: `log/slog` JSON; every write logs name, type, target, uuid and outcome
   at info; the raw table is never logged, even at debug.
 - Alerts for the consuming cluster to define: `ExternalDNSStale` (no successful
@@ -419,19 +432,24 @@ credentials.
 
 ## 11. Release engineering
 
-- release-please (`simple`, bare SemVer tags, conventional-commit PR titles,
-  squash merge).
-- `docker/github-builder` reusable workflow: `linux/amd64,linux/arm64`, SBOM,
-  keyless signing, tags `<version>`, `rolling`, `main`, pushed to
-  `ghcr.io/lukeevanstech/external-dns-opnsense-webhook`. Distroless static
-  nonroot image, `EXPOSE 8888 8080`.
-- CI: golangci-lint v2, `go test -race ./...` with a tidy check, the reconcile
-  and end-to-end suites, govulncheck, actionlint + zizmor, super-linter through
-  `LukeEvansTech/shared-workflows` (house gate: run the real image locally
-  before pushing).
+- Releases are cut by hand, not by release-please: a `chore(release): X.Y.Z`
+  pull request that bumps `CHANGELOG.md`, then a `vX.Y.Z` tag pushed at the
+  merge commit.
+- `.github/workflows/docker-publish.yml` builds `linux/amd64,linux/arm64` with
+  Buildx and attaches an SBOM and provenance, pushing to
+  `ghcr.io/lukeevanstech/external-dns-opnsense-webhook`: `X.Y.Z` and `X.Y` from
+  a tag, `main` from a push to the default branch, and the short commit SHA for
+  every build. Pull requests build without pushing. Distroless static nonroot
+  image, `EXPOSE 8888/tcp`.
+- CI (`.github/workflows/ci.yaml`): golangci-lint v2, `go test -race` with a
+  `go mod tidy` check, the end-to-end and reconcile suites, govulncheck,
+  actionlint + zizmor. super-linter runs from `LukeEvansTech/shared-workflows`
+  in `.github/workflows/lint.yml` with `soft-launch: false`, its own Go linters
+  disabled because the bundled golangci-lint predates this module's Go version
+  (house gate: run the real image locally before pushing).
 - Renovate via `github>LukeEvansTech/renovate-config`. Digest pinning of the
   image in the consuming cluster is Renovate's job.
-- `AGENTS.md` with the fleet Go conventions; `CLAUDE.md` is `@AGENTS.md`.
+- `AGENTS.md` carries the fleet Go conventions; `CLAUDE.md` imports it.
 
 ## 12. Risks and open items
 
@@ -445,8 +463,8 @@ credentials.
   characters; a long namespace/name pair could approach the cap. The provider
   refuses rather than truncates, and the metric makes it visible.
 - **Hand-made aliases on managed rows** block deletion (6.2 step 5) by design;
-  `opnsense_delete_blocked_total` makes it visible and the operator re-homes or
-  removes the alias.
+  `externaldns_webhook_opnsense_delete_blocked_total` makes it visible and the
+  operator re-homes or removes the alias.
 - **Pagination is offset-based**; the consistency rules in 6.1 detect a moving
   table and restart, they cannot make a single read atomic. A page can still
   exceed 64 KiB if rows carry many children; that no longer matters on 26.7.1+

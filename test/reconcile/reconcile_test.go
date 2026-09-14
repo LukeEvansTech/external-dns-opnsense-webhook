@@ -338,11 +338,10 @@ func TestReconcile_Faults(t *testing.T) {
 			// no further reconcile can fix it: the TXT registry folds every
 			// heritage-bearing TXT into its ownership map instead of
 			// returning it as an endpoint, so the planner never sees a record
-			// to delete and the next plan is empty. DESIGN.md records the
-			// same outcome — orphan TXT rows are harmless and migrate.py
-			// plan --txt-orphans lists them for review-then-delete. Pinned
-			// here so the day the provider or the registry does reap it, this
-			// case fails and says so.
+			// to delete and the next plan is empty. The design accepts orphan
+			// registry rows as harmless; the operator's migration tooling
+			// lists them. Pinned here so the day the provider or the registry
+			// does reap it, this case fails and says so.
 			name:            "A delete ok then TXT delete fails",
 			op:              fake.OpDel,
 			arm:             func(f *fake.Server) { f.Inject(fake.Fault{Op: fake.OpDel, Status: 500, Times: 1, SkipCalls: 1}) },
