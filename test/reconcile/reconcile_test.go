@@ -26,6 +26,16 @@ const (
 
 	foreignTXTName = "k8s.main.a-theirs.example.com"
 	recordTypeTXT  = "TXT"
+
+	// foreignMarker is the description on the rows another controller owns.
+	// Deliberately not "external-dns", the default OPNSENSE_OWNER_MARKER the
+	// binary runs with: sharing the marker would make these rows look managed
+	// to the startup served-state check, and would leave it ambiguous whether
+	// they survive a scenario because the planner respects the foreign owner
+	// label or merely because nothing happened to touch them.
+	foreignMarker = "other-external-dns"
+
+	readyWithin = 10 * time.Second
 )
 
 func a(name string, ttl int64, targets ...string) *endpoint.Endpoint {
@@ -33,9 +43,9 @@ func a(name string, ttl int64, targets ...string) *endpoint.Endpoint {
 }
 
 type fixtures struct {
-	handRow  fake.Row
-	handAlia fake.Alias
-	foreign  fake.Row
+	handRow   fake.Row
+	handAlias fake.Alias
+	foreign   fake.Row
 }
 
 // seed installs the rows every scenario must leave untouched: a hand-made row
@@ -47,21 +57,21 @@ func seed(t *testing.T, f *fake.Server) fixtures {
 	f.AddAlias(id, "files", "")
 	f.AddRow(fake.Row{
 		Hostname: "k8s.main.a-theirs", Domain: "example.com", RR: recordTypeTXT,
-		TXTData: "heritage=external-dns,external-dns/owner=other", Description: "external-dns",
+		TXTData: "heritage=external-dns,external-dns/owner=other", Description: foreignMarker,
 	})
 	f.AddRow(fake.Row{
 		Hostname: "theirs", Domain: "example.com", RR: "A",
-		Server: "192.0.2.60", Description: "external-dns",
+		Server: "192.0.2.60", Description: foreignMarker,
 	})
 	f.Reconfigure()
 	rows, aliases := f.Rows(), f.Aliases()
-	return fixtures{handRow: rows[0], handAlia: aliases[0], foreign: rows[1]}
+	return fixtures{handRow: rows[0], handAlias: aliases[0], foreign: rows[1]}
 }
 
 // untouchedProblems reports every way the protected objects differ from the
 // fixtures, in both the config table and the served table. It returns the
-// problems rather than failing so the known-bad control below can prove each
-// branch fires.
+// problems rather than failing so TestReconcile_UntouchedControl can prove
+// each branch fires.
 func untouchedProblems(f *fake.Server, fx fixtures) []string {
 	var problems []string
 	var hand, foreign *fake.Row
@@ -79,7 +89,7 @@ func untouchedProblems(f *fake.Server, fx fixtures) []string {
 	if foreign == nil || !reflect.DeepEqual(*foreign, fx.foreign) {
 		problems = append(problems, fmt.Sprintf("foreign-owned TXT changed: %+v", foreign))
 	}
-	if len(f.Aliases()) != 1 || f.Aliases()[0] != fx.handAlia {
+	if len(f.Aliases()) != 1 || f.Aliases()[0] != fx.handAlias {
 		problems = append(problems, fmt.Sprintf("hand-made alias changed: %+v", f.Aliases()))
 	}
 	// The served table has to agree: the hand-made row, the alias copy of it
@@ -136,8 +146,25 @@ func txtRows(f *fake.Server) int {
 }
 
 // TestReconcile_UntouchedControl is the known-bad control for
-// untouchedProblems: an untouched table must report nothing, and each
-// protected object, edited through the fake's own API, must be caught.
+// untouchedProblems: the assertion every other test leans on has to be shown
+// to fire, or "nothing unrelated changed" is just a checker that examined
+// nothing.
+//
+// untouchedProblems has five branches. Four are proved in isolation — a case
+// breaks exactly one and the others stay green:
+//
+//	hand-made row edited  -> the hand-made row's DeepEqual branch
+//	foreign TXT deleted   -> the foreign row's DeepEqual branch
+//	hand-made alias added -> the alias count/equality branch
+//	served A row dropped  -> the served-table branch, via the "theirs" A row,
+//	                         which no config-table branch looks at
+//
+// The fifth, "the foreign-owned TXT is no longer served", has no isolated
+// case and cannot have one: the fake derives its served table from its config
+// table, so the only ways to unpublish that row (delete it, or disable it)
+// both change the row itself and therefore trip the DeepEqual branch too. The
+// last case below fires it together with that branch, which still proves the
+// check is reachable and wired to the served table rather than dead.
 func TestReconcile_UntouchedControl(t *testing.T) {
 	post := func(t *testing.T, f *fake.Server, path, body string) {
 		t.Helper()
@@ -147,29 +174,41 @@ func TestReconcile_UntouchedControl(t *testing.T) {
 		}
 		_ = resp.Body.Close()
 	}
+	del := func(t *testing.T, f *fake.Server, uuid string) {
+		t.Helper()
+		post(t, f, "/api/unbound/settings/delHostOverride/"+uuid, `{}`)
+	}
 	cases := []struct {
-		name   string
-		mutate func(t *testing.T, f *fake.Server, fx fixtures)
+		name string
+		// wantIsolated is the number of problems the break must produce: 1
+		// for the four isolated branches, 2 for the served-TXT case that
+		// cannot be isolated.
+		wantIsolated int
+		mutate       func(t *testing.T, f *fake.Server, fx fixtures)
 	}{
-		{"hand-made row edited", func(t *testing.T, f *fake.Server, fx fixtures) {
+		{"hand-made row edited", 1, func(t *testing.T, f *fake.Server, fx fixtures) {
 			post(t, f, "/api/unbound/settings/setHostOverride/"+fx.handRow.UUID,
 				`{"host":{"hostname":"nas","domain":"example.com","rr":"A","server":"198.51.100.1"}}`)
 		}},
-		{"foreign TXT deleted", func(t *testing.T, f *fake.Server, fx fixtures) {
-			post(t, f, "/api/unbound/settings/delHostOverride/"+fx.foreign.UUID, `{}`)
+		{"foreign TXT deleted", 1, func(t *testing.T, f *fake.Server, fx fixtures) {
+			del(t, f, fx.foreign.UUID)
 		}},
-		{"hand-made alias added", func(_ *testing.T, f *fake.Server, fx fixtures) {
+		{"hand-made alias added", 1, func(_ *testing.T, f *fake.Server, fx fixtures) {
 			f.AddAlias(fx.handRow.UUID, "extra", "")
 		}},
-		{"served table stale", func(t *testing.T, f *fake.Server, _ fixtures) {
-			// Deleting a row nothing else asserts on, then republishing,
-			// leaves the config-table checks green and only the served-table
-			// check red.
+		{"served A row dropped", 1, func(t *testing.T, f *fake.Server, _ fixtures) {
+			// "theirs" is in the served-table list and in no config-table
+			// check, so deleting it and republishing reddens the served
+			// branch alone.
 			for _, r := range f.Rows() {
 				if r.Hostname == "theirs" {
-					post(t, f, "/api/unbound/settings/delHostOverride/"+r.UUID, `{}`)
+					del(t, f, r.UUID)
 				}
 			}
+			f.Reconfigure()
+		}},
+		{"foreign TXT unpublished", 2, func(t *testing.T, f *fake.Server, fx fixtures) {
+			del(t, f, fx.foreign.UUID)
 			f.Reconfigure()
 		}},
 	}
@@ -181,8 +220,9 @@ func TestReconcile_UntouchedControl(t *testing.T) {
 				t.Fatalf("untouched table reported problems: %v", got)
 			}
 			tc.mutate(t, f, fx)
-			if got := untouchedProblems(f, fx); len(got) == 0 {
-				t.Errorf("no problem reported after %s", tc.name)
+			got := untouchedProblems(f, fx)
+			if len(got) != tc.wantIsolated {
+				t.Errorf("after %s: %d problems %v, want %d", tc.name, len(got), got, tc.wantIsolated)
 			}
 		})
 	}
@@ -191,7 +231,7 @@ func TestReconcile_UntouchedControl(t *testing.T) {
 func TestReconcile_Lifecycle(t *testing.T) {
 	h := newHarness(t)
 	fx := seed(t, h.fake)
-	h.waitFor(h.healthURL+"/readyz", 200, 10*time.Second)
+	h.waitForReady(readyWithin)
 	reg := newRegistry(t, h.webhookURL)
 	// The TXT value carries the resource label the registry writes; the test
 	// asserts presence, not content.
@@ -240,38 +280,56 @@ func TestReconcile_Lifecycle(t *testing.T) {
 
 func TestReconcile_Faults(t *testing.T) {
 	cases := []struct {
-		name   string
+		name string
+		// op is the fake operation the fault is armed on. The case asserts it
+		// was called after arming, so a fault that never had the chance to
+		// fire cannot pass as a converged scenario.
+		op     string
 		arm    func(f *fake.Server)
 		before []*endpoint.Endpoint
 		after  []*endpoint.Endpoint
 		// wantTXTRows is how many registry rows for appName the converged
-		// table must hold. It is stated per case rather than derived from
-		// after, because one fault leaves an orphan the controller cannot
-		// reach (see the note on the delete case).
+		// config table must hold. It is stated per case rather than derived
+		// from after, because one fault leaves an orphan the controller
+		// cannot reach (see the note on the delete case). Every case here
+		// expects exactly one, so the served-table check below is a plain
+		// "the registry row is published"; a case that legitimately expected
+		// zero would need that check rewritten as well.
 		wantTXTRows int
+		// minReconfigures is the floor on successful publishes, counting the
+		// one seed does. It matters most in the reconfigure case, where the
+		// apply's own reload fails and only the repair-on-read path in
+		// Records() can get the count to two.
+		minReconfigures int
 	}{
 		{
 			name: "txt ok then A add fails",
+			op:   fake.OpAddHostOverride,
 			arm: func(f *fake.Server) {
 				f.Inject(fake.Fault{Op: fake.OpAddHostOverride, Status: 500, Times: 1, SkipCalls: 1})
 			},
-			after:       []*endpoint.Endpoint{a(appName, 0, "192.0.2.1")},
-			wantTXTRows: 1,
+			after:           []*endpoint.Endpoint{a(appName, 0, "192.0.2.1")},
+			wantTXTRows:     1,
+			minReconfigures: 2,
 		},
 		{
 			name: "A add committed, response lost",
+			op:   fake.OpAddHostOverride,
 			arm: func(f *fake.Server) {
 				f.Inject(fake.Fault{Op: fake.OpAddHostOverride, Status: 502, Times: 1, SkipCalls: 1, AfterCommit: true})
 			},
-			after:       []*endpoint.Endpoint{a(appName, 0, "192.0.2.1")},
-			wantTXTRows: 1,
+			after:           []*endpoint.Endpoint{a(appName, 0, "192.0.2.1")},
+			wantTXTRows:     1,
+			minReconfigures: 2,
 		},
 		{
-			name:        "partial update",
-			arm:         func(f *fake.Server) { f.Inject(fake.Fault{Op: fake.OpSet, Status: 500, Times: 1}) },
-			before:      []*endpoint.Endpoint{a(appName, 0, "192.0.2.1")},
-			after:       []*endpoint.Endpoint{a(appName, 600, "192.0.2.1")},
-			wantTXTRows: 1,
+			name:            "partial update",
+			op:              fake.OpSet,
+			arm:             func(f *fake.Server) { f.Inject(fake.Fault{Op: fake.OpSet, Status: 500, Times: 1}) },
+			before:          []*endpoint.Endpoint{a(appName, 0, "192.0.2.1")},
+			after:           []*endpoint.Endpoint{a(appName, 600, "192.0.2.1")},
+			wantTXTRows:     1,
+			minReconfigures: 2,
 		},
 		{
 			// The data row goes (phase 3) and the registry row does not
@@ -285,33 +343,55 @@ func TestReconcile_Faults(t *testing.T) {
 			// plan --txt-orphans lists them for review-then-delete. Pinned
 			// here so the day the provider or the registry does reap it, this
 			// case fails and says so.
-			name:        "A delete ok then TXT delete fails",
-			arm:         func(f *fake.Server) { f.Inject(fake.Fault{Op: fake.OpDel, Status: 500, Times: 3, SkipCalls: 1}) },
-			before:      []*endpoint.Endpoint{a(appName, 0, "192.0.2.1")},
-			after:       nil,
-			wantTXTRows: 1,
+			name:            "A delete ok then TXT delete fails",
+			op:              fake.OpDel,
+			arm:             func(f *fake.Server) { f.Inject(fake.Fault{Op: fake.OpDel, Status: 500, Times: 1, SkipCalls: 1}) },
+			before:          []*endpoint.Endpoint{a(appName, 0, "192.0.2.1")},
+			after:           nil,
+			wantTXTRows:     1,
+			minReconfigures: 2,
 		},
 		{
-			name:        "reconfigure fails then empty plan",
-			arm:         func(f *fake.Server) { f.Inject(fake.Fault{Op: fake.OpReconfigure, Status: 500, Times: 1}) },
-			after:       []*endpoint.Endpoint{a(appName, 0, "192.0.2.1")},
-			wantTXTRows: 1,
+			name:            "reconfigure fails then empty plan",
+			op:              fake.OpReconfigure,
+			arm:             func(f *fake.Server) { f.Inject(fake.Fault{Op: fake.OpReconfigure, Status: 500, Times: 1}) },
+			after:           []*endpoint.Endpoint{a(appName, 0, "192.0.2.1")},
+			wantTXTRows:     1,
+			minReconfigures: 2,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t, "OPNSENSE_RETRY_ATTEMPTS=1")
 			fx := seed(t, h.fake)
-			h.waitFor(h.healthURL+"/readyz", 200, 10*time.Second)
+			h.waitForReady(readyWithin)
 			reg := newRegistry(t, h.webhookURL)
 			if tc.before != nil {
 				converge(t, reg, tc.before, 3)
 			}
-			tc.arm(h.fake)
-			converge(t, reg, tc.after, 4)
 
-			// Served table: every desired target is published, and a deleted
-			// name is gone from it.
+			hitsBefore := h.fake.Hits(tc.op)
+			tc.arm(h.fake)
+
+			// The first reconcile after arming has to fail. That is the fault
+			// firing; without it the rest of the case would be a plain
+			// happy-path run wearing a fault's name.
+			changed, err := reconcileOnce(t, reg, tc.after)
+			if err == nil {
+				t.Fatalf("armed %s fault did not fail the first reconcile (changed=%v)", tc.op, changed)
+			}
+			t.Logf("fault fired: %v", err)
+			converge(t, reg, tc.after, 3)
+
+			if got := h.fake.Hits(tc.op); got <= hitsBefore {
+				t.Errorf("%s calls after arming = %d, want more than %d", tc.op, got, hitsBefore)
+			}
+			if got := h.fake.Reconfigures(); got < tc.minReconfigures {
+				t.Errorf("successful reconfigures = %d, want at least %d", got, tc.minReconfigures)
+			}
+
+			// Served table: every desired target is published, the registry
+			// row with it, and a deleted name is gone from it.
 			for _, e := range tc.after {
 				for _, target := range e.Targets {
 					if !servedHas(h.fake, e.DNSName, "A", target) {
@@ -322,8 +402,8 @@ func TestReconcile_Faults(t *testing.T) {
 			if tc.after == nil && servedHas(h.fake, appName, "A", "192.0.2.1") {
 				t.Errorf("deleted data row still served: %+v", h.fake.Served())
 			}
-			if got := txtServed(h.fake, appTXTName); got != (tc.wantTXTRows > 0) {
-				t.Errorf("registry TXT served = %v, want %v: %+v", got, tc.wantTXTRows > 0, h.fake.Served())
+			if !txtServed(h.fake, appTXTName) {
+				t.Errorf("registry TXT not served: %+v", h.fake.Served())
 			}
 
 			// Config table: no duplicate registry rows from a retried write.
@@ -338,22 +418,25 @@ func TestReconcile_Faults(t *testing.T) {
 func TestReconcile_RestartWithPendingReconfigure(t *testing.T) {
 	h := newHarness(t, "OPNSENSE_RETRY_ATTEMPTS=1")
 	fx := seed(t, h.fake)
-	h.waitFor(h.healthURL+"/readyz", 200, 10*time.Second)
+	h.waitForReady(readyWithin)
 	reg := newRegistry(t, h.webhookURL)
 	h.fake.Inject(fake.Fault{Op: fake.OpReconfigure, Status: 500, Times: 1})
-	_, _ = reconcileOnce(t, reg, []*endpoint.Endpoint{a(appName, 0, "192.0.2.1")})
+	if _, err := reconcileOnce(t, reg, []*endpoint.Endpoint{a(appName, 0, "192.0.2.1")}); err == nil {
+		t.Fatal("apply with a failing reconfigure did not report an error")
+	}
 	if servedHas(h.fake, appName, "A", "192.0.2.1") {
 		t.Fatal("served despite failed reconfigure")
 	}
-	h.restart() // kills the binary and starts a new one on the same ports
-	h.waitFor(h.healthURL+"/readyz", 200, 10*time.Second)
-	deadline := time.Now().Add(10 * time.Second)
-	for !servedHas(h.fake, appName, "A", "192.0.2.1") && time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
-	}
-	if !servedHas(h.fake, appName, "A", "192.0.2.1") {
-		t.Fatalf("startup served-state check did not publish the row: %+v", h.fake.Served())
-	}
+
+	// The pending flag lives in memory, so a fresh process has to rediscover
+	// the saved-but-unserved rows for itself. Readiness is not the signal
+	// here (see waitForReady): the startup check runs in its own goroutine,
+	// so wait for what it does rather than for the probe.
+	h.restart()
+	h.waitForReady(readyWithin)
+	pollUntil(t, readyWithin, "the startup served-state check publishing the pending row", func() bool {
+		return servedHas(h.fake, appName, "A", "192.0.2.1")
+	})
 	if !txtServed(h.fake, appTXTName) {
 		t.Errorf("startup served-state check did not publish the registry TXT: %+v", h.fake.Served())
 	}
