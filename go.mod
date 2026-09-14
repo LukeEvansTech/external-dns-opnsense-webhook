@@ -4,6 +4,7 @@ go 1.27.0
 
 require (
 	github.com/caarlos0/env/v11 v11.4.1
+	github.com/google/uuid v1.6.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
 	golang.org/x/sync v0.23.0
@@ -38,7 +39,6 @@ require (
 	github.com/go-openapi/swag/yamlutils v0.28.0 // indirect
 	github.com/google/gnostic-models v0.7.1 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/miekg/dns v1.1.73 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
