@@ -27,3 +27,9 @@ tmp/
 
 # Unsanitised captures from hack/capture-fixtures.sh
 internal/opnsense/testdata/*.raw.json
+
+# Coverage profile written by `mise run test`
+cover.out
+
+# Playwright MCP session artifacts
+.playwright-mcp/
