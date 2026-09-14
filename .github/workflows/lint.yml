@@ -19,4 +19,15 @@ jobs:
     uses: LukeEvansTech/shared-workflows/.github/workflows/super-linter.yml@239610499ad65c397d8d90b1a139d041bf28598a # v1
     with:
       soft-launch: false
-      filter-regex-exclude: '(^|/)(vendor|node_modules|\.terraform|\.venv|dist|build)/|(^|/)internal/opnsense/testdata/'
+      # LICENSE is the verbatim Apache-2.0 text: its indentation cannot be
+      # changed to satisfy editorconfig-checker, so it is excluded rather
+      # than reformatted.
+      filter-regex-exclude: '(^|/)(vendor|node_modules|\.terraform|\.venv|dist|build)/|(^|/)internal/opnsense/testdata/|(^|/)LICENSE$'
+      # super-linter v8.6.0 bundles a golangci-lint built with go1.26, which
+      # refuses to load any config for a module targeting go1.27 ("the Go
+      # language version (go1.26) used to build golangci-lint is lower than
+      # the targeted Go version (1.27.0)"). Go is linted by this repository's
+      # own golangci-lint job in ci.yaml, which runs the pinned version from
+      # .mise/config.toml against the whole module.
+      validate-go: false
+      validate-go-modules: false

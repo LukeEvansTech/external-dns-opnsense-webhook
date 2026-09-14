@@ -4,7 +4,7 @@ Guidance for coding agents and humans writing Go in this repository. The
 conventions below are the home-operations fleet Go conventions, adopted here
 verbatim because the code is derived from external-dns-unifi-webhook.
 
-## Working in this repo
+## Working in this repository
 
 - PR titles follow Conventional Commits; commit bodies explain why.
 - Releases are cut by hand: a `chore(release): X.Y.Z` PR, then a `vX.Y.Z` tag
@@ -16,29 +16,28 @@ verbatim because the code is derived from external-dns-unifi-webhook.
 
 ## Baseline
 
-- **Idiomatic.** Follow [Effective Go](https://go.dev/doc/effective_go) and
-  the [Code Review Comments](https://go.dev/wiki/CodeReviewComments) wiki.
-  `gofmt` and `goimports` run as golangci-lint's formatters, via `mise run
-  lint` and again in CI: never hand-format, and don't fight it with inline
-  exceptions. Comments explain non-obvious constraints only (a hidden
-  invariant, why a workaround exists, what would surprise a reader); don't
-  narrate what good naming already says, and don't reference the current
-  change or past behavior in a comment: that belongs in the PR description
-  and rots as the code moves on.
-- **Go version.** The language version is whatever `go.mod`'s `go`
-  directive says; read it from there rather than assuming or hard-coding
-  one. The directive is pinned to the lowest patch release of its minor
-  that the dependencies allow (`1.N.0` unless one forces higher) and
-  Renovate no longer bumps it; `.mise/config.toml`'s `tools.go` is the
-  toolchain that actually builds and tests, so the two are expected to
-  differ. Raise the directive only when the code or a dependency needs a
-  newer Go version. Write idiomatic Go for the directive's version: when
-  a newer construct is genuinely more idiomatic, use it (Go 1.26, for
-  example, added `errors.AsType[T](err)`, a generic type-safe replacement
-  for the `var t *T; errors.As(err, &t)` two-step; prefer it in new
-  code). `go fix` (rebuilt in 1.26 as a modernizer runner on `go vet`'s
-  analysis) surfaces these mechanical migrations; run it after a
-  toolchain bump.
+- **Idiomatic.** Follow [Effective Go](https://go.dev/doc/effective_go) and the
+  [Code Review Comments](https://go.dev/wiki/CodeReviewComments) wiki. `gofmt`
+  and `goimports` run as golangci-lint's formatters, via `mise run lint` and
+  again in CI: never hand-format, and don't fight it with inline exceptions.
+  Comments explain non-obvious constraints only (a hidden invariant, why a
+  workaround exists, what would surprise a reader); don't narrate what good
+  naming already says, and don't reference the current change or past behavior
+  in a comment: that belongs in the PR description and rots as the code moves
+  on.
+- **Go version.** The language version is whatever `go.mod`'s `go` directive
+  says; read it from there rather than assuming or hardcoding one. The
+  directive is pinned to the lowest patch release of its minor that the
+  dependencies allow (`1.N.0` unless one forces higher) and Renovate no longer
+  bumps it; `.mise/config.toml`'s `tools.go` is the toolchain that actually
+  builds and tests, so the two are expected to differ. Raise the directive only
+  when the code or a dependency needs a newer Go version. Write idiomatic Go
+  for the directive's version: when a newer construct is genuinely more
+  idiomatic, use it (Go 1.26, for example, added `errors.AsType[T](err)`, a
+  generic type-safe replacement for the `var t *T; errors.As(err, &t)`
+  two-step; prefer it in new code). `go fix` (rebuilt in 1.26 as a modernizer
+  runner on `go vet`'s analysis) surfaces these mechanical migrations; run it
+  after a toolchain bump.
 - **Idempotent.** Reconcilers, code generators, and CLI subcommands must be
   safe to re-run: identical input yields identical output/state, with no
   accumulating side effects on a second invocation.
@@ -73,14 +72,13 @@ verbatim because the code is derived from external-dns-unifi-webhook.
   logger through call chains that don't need one.
 - **`github.com/caarlos0/env/v11`** for env-var-driven configuration: one
   `Config` struct (commonly in `internal/config`), populated by
-  `env.Parse`/`env.ParseAs`, behind a `Load()` that also derives any
-  computed fields and validates: fail fast on invalid config at startup
-  instead of letting a bad value surface later as a runtime error.
-  Doc-comment every field with what it does and why its `envDefault` is
-  what it is; the struct doubles as the config reference. If this repo is
-  primarily a CLI tool already using `pflag`/`cobra` with its own
-  env-var-binding convention, match that existing pattern instead of
-  introducing a second, competing config path.
+  `env.Parse`/`env.ParseAs`, behind a `Load()` that also derives any computed
+  fields and validates: fail fast on invalid config at startup instead of
+  letting a bad value surface later as a runtime error. Doc-comment every field
+  with what it does and why its `envDefault` is what it is; the struct doubles
+  as the config reference. If this repository is primarily a command-line tool
+  already using `pflag`/`cobra` with its own env-var-binding convention, match
+  that existing pattern instead of introducing a second, competing config path.
 - **`github.com/spf13/pflag`, only when the app has a real CLI surface**:
   subcommands, flags a human types, anything beyond "read env vars and
   serve." Wire it through `github.com/spf13/cobra` rather than a bare
@@ -92,12 +90,12 @@ verbatim because the code is derived from external-dns-unifi-webhook.
 
 ## Project layout
 
-`cmd/<app>/main.go` is the entrypoint; everything else lives under
-`internal/` unless another repo needs to import this one as a library, in
-which case the exported package lives outside `internal/` at the module
-root. Keep `main.go` to wiring: parse config, build the logger, construct
-dependencies, run, translate the top-level error into an exit code.
-Business logic belongs in `internal/<package>`, not in `main`.
+`cmd/<app>/main.go` is the entrypoint; everything else lives under `internal/`
+unless another repository needs to import this one as a library, in which case
+the exported package lives outside `internal/` at the module root. Keep
+`main.go` to wiring: parse config, build the logger, construct dependencies,
+run, translate the top-level error into an exit code. Business logic belongs in
+`internal/<package>`, not in `main`.
 
 ## Errors
 
@@ -128,15 +126,16 @@ propagates the first error and cancels the group's context for you.
 ## Build, lint, test (via mise)
 
 Mise is mandatory: it pins the exact Go and golangci-lint versions
-(`.mise/config.toml`), so running `go build`/`go test` outside `mise run`
-risks a toolchain mismatch with CI. Run `mise tasks` to see what's actually
-defined in this repo; don't copy another repo's task names, flags, or
-output paths (`-race`, `$(go list ./...)` vs `./...`, build output
-location, `-ldflags` version stamping all vary) without checking
-`.mise/config.toml` first. Fleet-wide, the common tasks are some subset of
-`build`, `fmt`, `vet`, `test`, `lint`, `lint-fix`, plus repo-specific ones
-like `generate`/`generate-check`, `test-integration`, `test-e2e`, `bench`,
-or `helm-*` for repos that ship a chart; not every repo has every task.
+(`.mise/config.toml`), so running `go build`/`go test` outside `mise run` risks
+a toolchain mismatch with CI. Run `mise tasks` to see what's actually defined
+in this repository; don't copy another repository's task names, flags, or
+output paths (`-race`, `$(go list ./...)` vs `./...`, build output location,
+`-ldflags` version stamping all vary) without checking `.mise/config.toml`
+first. Fleet-wide, the common tasks are some subset of `build`, `fmt`, `vet`,
+`test`, `lint`, `lint-fix`, plus repo-specific ones like
+`generate`/`generate-check`, `test-integration`, `test-e2e`, `bench`, or
+`helm-*` for repositories that ship a chart; not every repository has every
+task.
 
 This repository enforces its gates directly rather than via a pre-commit
 hook: `.golangci.yml` pins the `gofmt`/`goimports` formatters plus the
@@ -152,19 +151,18 @@ shared super-linter workflow.
 
 Static binaries are the fleet default: `CGO_ENABLED=0`, `-trimpath`, and
 `-ldflags` stamping build metadata into exported `main` package variables,
-though the exact variable names differ per repo (`main.version`/
+though the exact variable names differ per repository (`main.version`/
 `main.commit`, `main.Version`/`main.Gitsha`, etc.): check `main.go` before
-copying an `-ldflags -X` example verbatim. The base image pattern is
-building `FROM golang:<pinned>-alpine` and running `FROM
-gcr.io/distroless/static:nonroot`. Only drop `CGO_ENABLED=0` if a
+copying an `-ldflags -X` example verbatim. The base image pattern is building
+`FROM golang:<pinned>-alpine` and running
+`FROM gcr.io/distroless/static:nonroot`. Only drop `CGO_ENABLED=0` if a
 dependency genuinely requires cgo, and justify it in a comment. Long-running
 services in containers commonly set `GOMEMLIMIT` via
-`github.com/KimMachineGun/automemlimit` so the GC reclaims before the
-cgroup OOM-kills the process; check whether this repo already does before
-adding it. Expose Prometheus metrics via `github.com/prometheus/client_golang`;
+`github.com/KimMachineGun/automemlimit` so the GC reclaims before the cgroup
+OOM-kills the process; check whether this repository already does before adding
+it. Expose Prometheus metrics via `github.com/prometheus/client_golang`;
 whether health/readiness probes share that port or use a separate one is a
-per-repo decision, check the manager/server setup in `main.go` before
-assuming.
+per-repo decision, check the manager/server setup in `main.go` before assuming.
 
 ## Security
 

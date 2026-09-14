@@ -24,26 +24,26 @@ CONF="$(mktemp)"
 BODY="$(mktemp)"
 trap 'rm -f "$CONF" "$BODY"' EXIT
 # printf is a shell builtin: the secret is never an argument to another process.
-printf 'user = "%s:%s"\n' "${OPNSENSE_API_KEY}" "${OPNSENSE_API_SECRET}" > "$CONF"
+printf 'user = "%s:%s"\n' "${OPNSENSE_API_KEY}" "${OPNSENSE_API_SECRET}" >"$CONF"
 
 CURL=(curl --silent --show-error --fail --config "$CONF" --header "Accept: application/json")
 if [[ "${OPNSENSE_SKIP_TLS_VERIFY:-0}" == "1" ]]; then
-  CURL+=(--insecure)
+    CURL+=(--insecure)
 fi
 
 post() { "${CURL[@]}" --header "Content-Type: application/json" --data "$2" "${OPNSENSE_HOST}$1"; }
 get() { "${CURL[@]}" "${OPNSENSE_HOST}$1"; }
 
 post /api/unbound/settings/searchHostOverride \
-  '{"current":1,"rowCount":3,"searchPhrase":"","sort":{"domain":"asc","hostname":"asc","rr":"asc","server":"asc"}}' \
-  > "$OUT/search_page1.raw.json"
-get /api/unbound/service/status > "$OUT/service_status.raw.json"
+    '{"current":1,"rowCount":3,"searchPhrase":"","sort":{"domain":"asc","hostname":"asc","rr":"asc","server":"asc"}}' \
+    >"$OUT/search_page1.raw.json"
+get /api/unbound/service/status >"$OUT/service_status.raw.json"
 # Written whole and then truncated: piping curl into head closes the pipe
 # early, which under `set -o pipefail` would fail the script.
-post /api/unbound/diagnostics/listlocaldata '{}' > "$BODY"
-head -c 4000 "$BODY" > "$OUT/listlocaldata.raw.json"
+post /api/unbound/diagnostics/listlocaldata '{}' >"$BODY"
+head -c 4000 "$BODY" >"$OUT/listlocaldata.raw.json"
 UUID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["rows"][0]["uuid"])' "$OUT/search_page1.raw.json")
-get "/api/unbound/settings/getHostOverride/${UUID}" > "$OUT/get_host.raw.json"
+get "/api/unbound/settings/getHostOverride/${UUID}" >"$OUT/get_host.raw.json"
 
 echo "Captured to $OUT (*.raw.json). Sanitise, rename to drop .raw, and delete the raw files:"
 echo "  - hostnames/domains -> example.com names; addresses -> 192.0.2.x; uuids -> 1111..., 2222...; descriptions cleared"
