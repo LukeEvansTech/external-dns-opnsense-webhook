@@ -30,10 +30,14 @@ const (
 )
 
 // keyResult is the JSON field name OPNsense's write endpoints report their
-// outcome under; resultFailed is its value on a validation failure.
+// outcome under; resultFailed is its value on a validation failure. keyStatus
+// is the JSON field name reconfigure/status/listlocaldata report under; it is
+// spelled the same as OpStatus by coincidence — OpStatus names the operation
+// for hit counters and faults, keyStatus names the response field.
 const (
 	keyResult    = "result"
 	resultFailed = "failed"
+	keyStatus    = "status"
 )
 
 // Row is a host override in the config table.
@@ -66,6 +70,9 @@ type Alias struct {
 // write is applied first, simulating a committed write whose response is lost.
 // SkipCalls lets that many calls to Op through before the fault fires, so a
 // test can target the Nth call of a phase-ordered apply.
+//
+// A fault fires only on a call that would otherwise succeed; an invalid
+// payload or unknown uuid answers normally and leaves the fault armed.
 type Fault struct {
 	Op          string
 	Status      int
@@ -108,6 +115,10 @@ func New(t testing.TB) *Server {
 func (s *Server) URL() string { return s.srv.URL }
 
 // AddRow inserts a row directly (a hand-made row). Empty Enabled means "1".
+// Empty AddPTR defaults to "0" here, deliberately unlike the API handlers
+// (handleAdd/handleSet), which default it to "1" like the real model — a
+// hand-made row is assumed to state what it wants, not to come from a client
+// that omitted the field.
 func (s *Server) AddRow(r Row) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -261,7 +272,6 @@ func (s *Server) rowJSON(r *Row, withChildren bool) map[string]any {
 	return m
 }
 
-//nolint:gocyclo // mirrors OPNsense's searchHostOverride: paging, sort and phrase filter in one handler.
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -281,9 +291,15 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
+	if req.Current < 1 {
+		req.Current = 1
+	}
 	// Sort: OPNsense builds one key from every sort field (padded to 30
 	// chars) and appends the node uuid, then ksort()s. Direction comes from
 	// the first key only. Reproduce that so tests exercise the real order.
+	// Padding here is always left-aligned (%-30s); OPNsense right-aligns
+	// numeric fields when building this key, so a numeric field's sort order
+	// (ttl is the only one exposed) is not faithfully modelled here.
 	fields := make([]string, 0, len(req.Sort))
 	for k := range req.Sort {
 		fields = append(fields, k)
@@ -420,13 +436,13 @@ func (s *Server) handleAdd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
+	if v := validate(b.Host); len(v) > 0 {
+		writeJSON(w, map[string]any{keyResult: resultFailed, "validations": v})
+		return
+	}
 	f := s.takeFault(OpAddHostOverride)
 	if f != nil && !f.AfterCommit {
 		http.Error(w, "injected", f.Status)
-		return
-	}
-	if v := validate(b.Host); len(v) > 0 {
-		writeJSON(w, map[string]any{keyResult: resultFailed, "validations": v})
 		return
 	}
 	row := &Row{
@@ -460,11 +476,6 @@ func (s *Server) handleSet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
-	f := s.takeFault(OpSet)
-	if f != nil && !f.AfterCommit {
-		http.Error(w, "injected", f.Status)
-		return
-	}
 	_, row := s.find(lastSegment(r.URL.Path))
 	if row == nil {
 		writeJSON(w, map[string]any{keyResult: resultFailed})
@@ -472,6 +483,11 @@ func (s *Server) handleSet(w http.ResponseWriter, r *http.Request) {
 	}
 	if v := validate(b.Host); len(v) > 0 {
 		writeJSON(w, map[string]any{keyResult: resultFailed, "validations": v})
+		return
+	}
+	f := s.takeFault(OpSet)
+	if f != nil && !f.AfterCommit {
+		http.Error(w, "injected", f.Status)
 		return
 	}
 	row.Enabled = orDefault(b.Host["enabled"], "1")
@@ -489,15 +505,15 @@ func (s *Server) handleDel(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.hits[OpDel]++
-	f := s.takeFault(OpDel)
-	if f != nil && !f.AfterCommit {
-		http.Error(w, "injected", f.Status)
-		return
-	}
 	id := lastSegment(r.URL.Path)
 	i, row := s.find(id)
 	if row == nil {
 		writeJSON(w, map[string]any{keyResult: "not found"})
+		return
+	}
+	f := s.takeFault(OpDel)
+	if f != nil && !f.AfterCommit {
+		http.Error(w, "injected", f.Status)
 		return
 	}
 	s.rows = append(s.rows[:i], s.rows[i+1:]...)
@@ -524,11 +540,22 @@ func (s *Server) handleReconfigure(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publishLocked()
-	writeJSON(w, map[string]any{OpStatus: "ok"})
+	writeJSON(w, map[string]any{keyStatus: "ok"})
 }
 
 // hostDomain is one name a row (or one of its aliases) is served under.
 type hostDomain struct{ host, domain string }
+
+// servedName renders the FQDN unbound_add_host_entries serves a host+domain
+// pair under. A blank host is a domain-apex override (OPNsense allows leaving
+// the host field blank to override the domain itself), so the name is just
+// "domain." — not ".domain." with a leading dot.
+func servedName(host, domain string) string {
+	if host == "" {
+		return domain + "."
+	}
+	return host + "." + domain + "."
+}
 
 // publishLocked renders the config table the way unbound_add_host_entries
 // does: each enabled row at its own name, plus a parent-type copy at each
@@ -547,7 +574,7 @@ func (s *Server) publishLocked() {
 			}
 		}
 		for _, n := range names {
-			e := Served{Name: n.host + "." + n.domain + ".", TTL: orDefault(row.TTL, "3600"), Type: "IN", RRType: row.RR}
+			e := Served{Name: servedName(n.host, n.domain), TTL: orDefault(row.TTL, "3600"), Type: "IN", RRType: row.RR}
 			switch row.RR {
 			case "TXT":
 				e.Value = `"` + row.TXTData + `"`
@@ -569,7 +596,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "injected", f.Status)
 		return
 	}
-	writeJSON(w, map[string]any{OpStatus: "running"})
+	writeJSON(w, map[string]any{keyStatus: "running"})
 }
 
 func (s *Server) handleListLocalData(w http.ResponseWriter, _ *http.Request) {
@@ -580,5 +607,5 @@ func (s *Server) handleListLocalData(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "injected", f.Status)
 		return
 	}
-	writeJSON(w, map[string]any{OpStatus: "ok", "data": append([]Served{}, s.served...)})
+	writeJSON(w, map[string]any{keyStatus: "ok", "data": append([]Served{}, s.served...)})
 }
