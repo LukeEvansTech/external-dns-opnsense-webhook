@@ -199,7 +199,13 @@ func (c *Client) SearchHostOverrides(ctx context.Context, current, rowCount int)
 	return page, nil
 }
 
-// GetHostOverride fetches one row by uuid.
+// GetHostOverride fetches one row by uuid. This endpoint does not answer in
+// searchHostOverride's shape: it expands every select field into the whole
+// option set — rr arrives as {"A":{"value":"A (IPv4 address)","selected":1},
+// "AAAA":{...},...} — and adds an aliases option set that nothing models.
+// hostRow's decoder resolves the expanded form back to the selected key, so
+// the row returned here compares with one read from a search page. The body
+// carries no uuid, so the one asked for is filled in below.
 func (c *Client) GetHostOverride(ctx context.Context, id string) (hostRow, error) {
 	var out getHostResponse
 	if err := c.do(ctx, opGetHostOverride, http.MethodGet, pathGet+id, nil, &out, maxResponseBytes); err != nil {
@@ -207,7 +213,9 @@ func (c *Client) GetHostOverride(ctx context.Context, id string) (hostRow, error
 	}
 	// getHostOverride answers {} for an unknown uuid rather than a 404, so an
 	// empty hostname and rr together is the only signal that the row does not
-	// exist. This relies on rr being a mandatory field on every real host row.
+	// exist. This relies on rr being a mandatory field on every real host row,
+	// and the empty rr survives the option decoding: an absent field is never
+	// an option set, so it stays the empty key rather than failing to resolve.
 	if out.Host.Hostname == "" && out.Host.RR == "" {
 		return hostRow{}, &APIError{Operation: opGetHostOverride, StatusCode: http.StatusNotFound, Message: "no such uuid " + id}
 	}

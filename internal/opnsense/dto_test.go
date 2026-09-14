@@ -43,6 +43,80 @@ func TestDTO_DecodeSearchPage(t *testing.T) {
 	}
 }
 
+func TestDTO_DecodeGetHost(t *testing.T) {
+	raw, err := os.ReadFile("testdata/get_host.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out getHostResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// The fixture is a sanitised capture. getHostOverride expands every select
+	// field, so rr arrives as the whole option set with one entry selected and
+	// has to resolve back to the bare key searchHostOverride would have sent;
+	// aliases is an option set too, and nothing models it, so it must be
+	// ignored rather than break the decode.
+	h := out.Host
+	if h.RR != recordTypeA {
+		t.Errorf("rr = %q, want %q", h.RR, recordTypeA)
+	}
+	if h.Hostname != "app" || h.Domain != "example.com" || h.Server != "192.0.2.10" {
+		t.Errorf("host = %+v", h)
+	}
+	if h.Enabled != "1" || h.AddPTR != "1" || h.TTL != "" || h.TXTData != "" {
+		t.Errorf("fields = %+v", h)
+	}
+	// The response carries no uuid; the client fills it in from the request.
+	if h.UUID != "" {
+		t.Errorf("uuid = %q, want empty", h.UUID)
+	}
+}
+
+func TestDTO_OptionFieldForms(t *testing.T) {
+	cases := map[string]struct {
+		in      string
+		want    string
+		wantErr string
+	}{
+		"flat key":           {`"A"`, "A", ""},
+		"flat empty":         {`""`, "", ""},
+		"expanded":           {`{"A":{"value":"A (IPv4 address)","selected":1},"TXT":{"value":"TXT (text)","selected":0}}`, "A", ""},
+		"selected as string": {`{"TXT":{"selected":"1"},"A":{"selected":"0"}}`, "TXT", ""},
+		"selected as bool":   {`{"AAAA":{"selected":true},"A":{"selected":false}}`, "AAAA", ""},
+		"selected absent":    {`{"A":{"value":"A (IPv4 address)"},"TXT":{"selected":1}}`, "TXT", ""},
+		"none selected":      {`{"A":{"selected":0},"TXT":{"selected":0}}`, "", "no selected value"},
+		"two selected":       {`{"TXT":{"selected":1},"A":{"selected":1}}`, "", "2 selected values: A, TXT"},
+		"not an option set":  {`5`, "", "neither a key nor an option set"},
+		// encoding/json leaves a non-pointer destination untouched for the
+		// literal null and reports no error, so a null select decodes to the
+		// empty key. Documented as observed behaviour, not a designed case:
+		// GetHostOverride reads an empty rr as "no such row".
+		"null": {`null`, "", ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var got optionField
+			err := json.Unmarshal([]byte(tc.in), &got)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected an error, got %q", got)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("err = %v, want it to mention %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", tc.in, err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("%s = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDTO_FlexBoolForms(t *testing.T) {
 	cases := map[string]struct {
 		want    bool

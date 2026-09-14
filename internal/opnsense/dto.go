@@ -2,7 +2,9 @@ package opnsense
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -45,10 +47,60 @@ func (s *StringOrList) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// optionField decodes a select field in either of the two shapes the API uses
+// for the same value. searchHostOverride flattens it to the selected key
+// ("A") and puts the display text in a sibling "%rr" field; getHostOverride
+// expands the whole option set instead — {"A":{"value":"A (IPv4 address)",
+// "selected":1},"AAAA":{...},...} — and leaves the reader to find the
+// selected key. A row decoded from either endpoint must come out the same, so
+// this resolves the expanded form back to the bare key.
+type optionField string
+
+// option is one entry of an expanded option set. Only the flag matters here;
+// "value" is display text for the UI. getHostOverride sends the flag as a
+// number, but the model layer spells booleans several ways elsewhere, so it is
+// read through flexBool rather than as an int.
+type option struct {
+	Selected flexBool `json:"selected"`
+}
+
+func (o *optionField) UnmarshalJSON(data []byte) error {
+	var flat string
+	if err := json.Unmarshal(data, &flat); err == nil {
+		*o = optionField(flat)
+		return nil
+	}
+	var set map[string]option
+	if err := json.Unmarshal(data, &set); err != nil {
+		return fmt.Errorf("opnsense: option field is neither a key nor an option set: %w", err)
+	}
+	selected := make([]string, 0, 1)
+	for key, opt := range set {
+		if bool(opt.Selected) {
+			selected = append(selected, key)
+		}
+	}
+	// Sorted so the message is the same on every run: map iteration is not.
+	sort.Strings(selected)
+	switch len(selected) {
+	case 1:
+		*o = optionField(selected[0])
+		return nil
+	case 0:
+		return errors.New("opnsense: option field has no selected value")
+	default:
+		return fmt.Errorf("opnsense: option field has %d selected values: %s", len(selected), strings.Join(selected, ", "))
+	}
+}
+
 // hostRow is one row of searchHostOverride (26.1+ tree view) or the body of
 // getHostOverride. Alias children carry the parent's rr/server/ttl and their
 // own hostname/domain/description; an empty hostname or domain on a child
 // means "inherit from the parent" (unbound.inc).
+//
+// The two endpoints do not agree on how a select field is rendered, so RR is
+// decoded through optionField in UnmarshalJSON below and kept here as the bare
+// key every other package compares against.
 //
 //nolint:tagliatelle // OPNsense field names cannot be changed
 type hostRow struct {
@@ -66,6 +118,26 @@ type hostRow struct {
 	Description string    `json:"description"`
 	IsAlias     flexBool  `json:"isAlias"`
 	Children    []hostRow `json:"_children"`
+}
+
+// UnmarshalJSON decodes rr from either endpoint's spelling while leaving RR a
+// plain string for every caller. The shim embeds a method-free copy of hostRow
+// — so this method cannot recurse into itself — and shadows rr with a field
+// one level shallower, which encoding/json prefers, so the option decoding
+// runs and the embedded string field is left alone. Children decode through
+// this same method, so an expanded alias row resolves too.
+func (r *hostRow) UnmarshalJSON(data []byte) error {
+	type plain hostRow
+	var shim struct {
+		plain
+		RR optionField `json:"rr"`
+	}
+	if err := json.Unmarshal(data, &shim); err != nil {
+		return err
+	}
+	*r = hostRow(shim.plain)
+	r.RR = string(shim.RR)
+	return nil
 }
 
 func (r hostRow) enabled() bool { return r.Enabled != "0" && r.Enabled != "" }

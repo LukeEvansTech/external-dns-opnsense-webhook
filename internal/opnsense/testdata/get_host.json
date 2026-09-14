@@ -1,0 +1,38 @@
+{
+  "host": {
+    "enabled": "1",
+    "hostname": "app",
+    "domain": "example.com",
+    "rr": {
+      "A": {
+        "value": "A (IPv4 address)",
+        "selected": 1
+      },
+      "AAAA": {
+        "value": "AAAA (IPv6 address)",
+        "selected": 0
+      },
+      "MX": {
+        "value": "MX (mail server)",
+        "selected": 0
+      },
+      "TXT": {
+        "value": "TXT (text)",
+        "selected": 0
+      }
+    },
+    "mxprio": "",
+    "mx": "",
+    "ttl": "",
+    "server": "192.0.2.10",
+    "txtdata": "",
+    "addptr": "1",
+    "aliases": {
+      "": {
+        "value": "",
+        "selected": 1
+      }
+    },
+    "description": ""
+  }
+}
