@@ -426,7 +426,7 @@ func TestDoRequest_FinalAttempt429IsCounted(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rateLimits := metrics.Get().UniFiRateLimitsTotal.WithLabelValues(metrics.ProviderName, "dns_policies")
+	rateLimits := metrics.Get().APIRateLimitsTotal.WithLabelValues(metrics.ProviderName, "dns_policies")
 	read := func() float64 {
 		t.Helper()
 		var dm dto.Metric

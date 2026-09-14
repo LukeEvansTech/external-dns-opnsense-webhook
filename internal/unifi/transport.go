@@ -98,7 +98,7 @@ func (c *httpClient) doRequest(ctx context.Context, method, path string, body []
 		// attempt's 429 (or the only one, with UNIFI_RETRY_ATTEMPTS=1) is the
 		// one that actually fails the operation.
 		if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
-			metrics.Get().UniFiRateLimitsTotal.WithLabelValues(metrics.ProviderName, opLabel(path)).Inc()
+			metrics.Get().APIRateLimitsTotal.WithLabelValues(metrics.ProviderName, opLabel(path)).Inc()
 		}
 
 		retryable, wait := c.retryAfter(method, resp, err, attempt)
@@ -121,7 +121,7 @@ func (c *httpClient) doRequest(ctx context.Context, method, path string, body []
 		if resp != nil {
 			status = strconv.Itoa(resp.StatusCode)
 		}
-		metrics.Get().UniFiRetriesTotal.WithLabelValues(metrics.ProviderName, opLabel(path), status).Inc()
+		metrics.Get().APIRetriesTotal.WithLabelValues(metrics.ProviderName, opLabel(path), status).Inc()
 		slog.Debug("retrying upstream request", "attempt", attempt+1, "wait", wait, "status", status)
 
 		select {

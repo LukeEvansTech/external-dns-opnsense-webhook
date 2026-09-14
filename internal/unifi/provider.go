@@ -197,7 +197,6 @@ func (p *UnifiProvider) ApplyChanges(ctx context.Context, changes *plan.Changes)
 			key := recordKey{ep.DNSName, recordTypeCNAME}
 			if _, handled := deletedKeys[key]; !handled {
 				if ids := byKeyType[key]; len(ids) > 0 {
-					m.CNAMEConflictsTotal.WithLabelValues(metrics.ProviderName).Inc()
 					if err := p.deleteByIDs(ctx, ids); err != nil {
 						return fmt.Errorf("deleting conflicting CNAME %s: %w", ep.DNSName, err)
 					}

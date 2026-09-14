@@ -730,7 +730,7 @@ func TestCreateEndpoint_RecordsResponseSize(t *testing.T) {
 	c := newTestClient(srv)
 	// HistogramVec.WithLabelValues returns an Observer; the concrete child also
 	// implements prometheus.Metric, which is what exposes Write for readback.
-	hist, ok := metrics.Get().UniFiResponseSizeBytes.WithLabelValues("create_endpoint").(prometheus.Metric)
+	hist, ok := metrics.Get().APIResponseSizeBytes.WithLabelValues("create_endpoint").(prometheus.Metric)
 	if !ok {
 		t.Fatal("response-size histogram child is not a prometheus.Metric")
 	}

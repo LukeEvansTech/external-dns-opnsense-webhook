@@ -22,7 +22,7 @@ func TestNewPopulatesAllVecs(t *testing.T) {
 	t.Parallel()
 	m := newTestMetrics(t)
 
-	if m.Info == nil || m.HTTPRequestsTotal == nil || m.UniFiAPIDuration == nil {
+	if m.Info == nil || m.HTTPRequestsTotal == nil || m.APIDuration == nil {
 		t.Fatal("expected metric vectors to be populated")
 	}
 }
@@ -33,12 +33,12 @@ func TestRecordHTTPRequest(t *testing.T) {
 	m.RecordHTTPRequest("GET", "/test", 200, 100*time.Millisecond, 1024)
 }
 
-func TestRecordUniFiAPICall(t *testing.T) {
+func TestRecordAPICall(t *testing.T) {
 	t.Parallel()
 	m := newTestMetrics(t)
 
-	m.RecordUniFiAPICall("test_op", 50*time.Millisecond, 512, nil)
-	m.RecordUniFiAPICall("test_op", 50*time.Millisecond, 0, errors.New("boom"))
+	m.RecordAPICall("test_op", 50*time.Millisecond, 512, nil)
+	m.RecordAPICall("test_op", 50*time.Millisecond, 0, errors.New("boom"))
 }
 
 // gaugeValue reads the current value of a single gauge through the dto
@@ -106,5 +106,49 @@ func TestSingletonReturnsSameInstance(t *testing.T) {
 	b := Get()
 	if a != b {
 		t.Errorf("Get() returned different instances")
+	}
+}
+
+func TestBuild_RegistersOPNsenseMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := build(promauto.With(reg), "test")
+
+	m.RecordAPICall("search_host_override", 10*time.Millisecond, 1234, nil)
+	m.PagesFetchedTotal.WithLabelValues(ProviderName).Inc()
+	m.ReadRestartsTotal.WithLabelValues(ProviderName).Inc()
+	m.RowsTotal.WithLabelValues(ProviderName).Set(261)
+	m.RecordReconfigure(nil)
+	m.PendingReconfigure.WithLabelValues(ProviderName).Set(1)
+	m.ApplyDuration.WithLabelValues(ProviderName).Observe(1.5)
+	m.DeleteBlockedTotal.WithLabelValues(ProviderName).Inc()
+	m.EndpointsDroppedTotal.WithLabelValues(ProviderName, "wildcard").Inc()
+	m.TXTInvalidTotal.WithLabelValues(ProviderName).Inc()
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	got := map[string]bool{}
+	for _, f := range families {
+		got[f.GetName()] = true
+	}
+	for _, want := range []string{
+		"externaldns_webhook_opnsense_api_duration_seconds",
+		"externaldns_webhook_opnsense_pages_fetched_total",
+		"externaldns_webhook_opnsense_read_restarts_total",
+		"externaldns_webhook_opnsense_rows",
+		"externaldns_webhook_opnsense_reconfigure_total",
+		"externaldns_webhook_opnsense_pending_reconfigure",
+		"externaldns_webhook_opnsense_apply_duration_seconds",
+		"externaldns_webhook_opnsense_delete_blocked_total",
+		"externaldns_webhook_opnsense_endpoints_dropped_total",
+		"externaldns_webhook_opnsense_txt_invalid_total",
+	} {
+		if !got[want] {
+			t.Errorf("metric %s not registered", want)
+		}
+	}
+	if ProviderName != "opnsense" {
+		t.Errorf("ProviderName = %q, want opnsense", ProviderName)
 	}
 }

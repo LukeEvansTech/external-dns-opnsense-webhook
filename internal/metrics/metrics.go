@@ -11,7 +11,7 @@ import (
 
 const (
 	namespace    = "externaldns_webhook"
-	ProviderName = "unifi"
+	ProviderName = "opnsense"
 
 	histogramBucketCount = 8
 
@@ -34,25 +34,33 @@ type Metrics struct {
 	HTTPJSONErrorsTotal       *prometheus.CounterVec
 
 	// Business metrics - DNS records
-	RecordsTotal             *prometheus.GaugeVec
-	ChangesTotal             *prometheus.CounterVec
-	ChangesByTypeTotal       *prometheus.CounterVec
-	CNAMEConflictsTotal      *prometheus.CounterVec
-	IgnoredCNAMETargetsTotal *prometheus.CounterVec
-	SRVParsingErrorsTotal    *prometheus.CounterVec
-	BatchSize                *prometheus.HistogramVec
+	RecordsTotal       *prometheus.GaugeVec
+	ChangesTotal       *prometheus.CounterVec
+	ChangesByTypeTotal *prometheus.CounterVec
+	BatchSize          *prometheus.HistogramVec
 
 	// Endpoint operations
 	AdjustEndpointsTotal *prometheus.CounterVec
 	NegotiateTotal       *prometheus.CounterVec
 
-	// UniFi API metrics
-	UniFiAPIErrorsTotal    *prometheus.CounterVec
-	UniFiAPIDuration       *prometheus.HistogramVec
-	UniFiResponseSizeBytes *prometheus.HistogramVec
-	UniFiRetriesTotal      *prometheus.CounterVec
-	UniFiRateLimitsTotal   *prometheus.CounterVec
-	PanicsTotal            *prometheus.CounterVec
+	// OPNsense API metrics
+	APIErrorsTotal       *prometheus.CounterVec
+	APIDuration          *prometheus.HistogramVec
+	APIResponseSizeBytes *prometheus.HistogramVec
+	APIRetriesTotal      *prometheus.CounterVec
+	APIRateLimitsTotal   *prometheus.CounterVec
+	PanicsTotal          *prometheus.CounterVec
+
+	// OPNsense provider metrics
+	PagesFetchedTotal     *prometheus.CounterVec
+	ReadRestartsTotal     *prometheus.CounterVec
+	RowsTotal             *prometheus.GaugeVec
+	ReconfigureTotal      *prometheus.CounterVec
+	PendingReconfigure    *prometheus.GaugeVec
+	ApplyDuration         *prometheus.HistogramVec
+	DeleteBlockedTotal    *prometheus.CounterVec
+	EndpointsDroppedTotal *prometheus.CounterVec
+	TXTInvalidTotal       *prometheus.CounterVec
 
 	// Quality metrics
 	ConsecutiveErrors    *prometheus.GaugeVec
@@ -165,30 +173,6 @@ func build(f promauto.Factory, version string) *Metrics {
 			},
 			[]string{labelProvider, labelOperation, labelRecordType},
 		),
-		CNAMEConflictsTotal: f.NewCounterVec(
-			prometheus.CounterOpts{
-				Namespace: namespace,
-				Name:      "cname_conflicts_total",
-				Help:      "Total number of CNAME conflicts detected",
-			},
-			[]string{labelProvider},
-		),
-		IgnoredCNAMETargetsTotal: f.NewCounterVec(
-			prometheus.CounterOpts{
-				Namespace: namespace,
-				Name:      "ignored_cname_targets_total",
-				Help:      "Total number of ignored CNAME targets (only first target is used)",
-			},
-			[]string{labelProvider},
-		),
-		SRVParsingErrorsTotal: f.NewCounterVec(
-			prometheus.CounterOpts{
-				Namespace: namespace,
-				Name:      "srv_parsing_errors_total",
-				Help:      "Total number of SRV record parsing errors",
-			},
-			[]string{labelProvider},
-		),
 		BatchSize: f.NewHistogramVec(
 			prometheus.HistogramOpts{
 				Namespace: namespace,
@@ -216,45 +200,45 @@ func build(f promauto.Factory, version string) *Metrics {
 			[]string{labelProvider},
 		),
 
-		UniFiAPIErrorsTotal: f.NewCounterVec(
+		APIErrorsTotal: f.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: namespace,
-				Name:      "unifi_api_errors_total",
-				Help:      "Total number of UniFi API errors",
+				Name:      "opnsense_api_errors_total",
+				Help:      "Total number of OPNsense API errors",
 			},
 			[]string{labelProvider, labelOperation},
 		),
-		UniFiAPIDuration: f.NewHistogramVec(
+		APIDuration: f.NewHistogramVec(
 			prometheus.HistogramOpts{
 				Namespace: namespace,
-				Name:      "unifi_api_duration_seconds",
-				Help:      "UniFi API request duration in seconds",
+				Name:      "opnsense_api_duration_seconds",
+				Help:      "OPNsense API request duration in seconds",
 				Buckets:   prometheus.DefBuckets,
 			},
 			[]string{labelProvider, labelOperation},
 		),
-		UniFiResponseSizeBytes: f.NewHistogramVec(
+		APIResponseSizeBytes: f.NewHistogramVec(
 			prometheus.HistogramOpts{
 				Namespace: namespace,
-				Name:      "unifi_response_size_bytes",
-				Help:      "UniFi API response size in bytes",
+				Name:      "opnsense_api_response_size_bytes",
+				Help:      "OPNsense API response size in bytes",
 				Buckets:   prometheus.ExponentialBuckets(100, 10, histogramBucketCount),
 			},
 			[]string{labelOperation},
 		),
-		UniFiRetriesTotal: f.NewCounterVec(
+		APIRetriesTotal: f.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: namespace,
-				Name:      "unifi_api_retries_total",
-				Help:      "Total number of UniFi API retries triggered by 5xx or 429 responses",
+				Name:      "opnsense_api_retries_total",
+				Help:      "Total number of OPNsense API retries triggered by 5xx or 429 responses",
 			},
 			[]string{labelProvider, labelOperation, "status"},
 		),
-		UniFiRateLimitsTotal: f.NewCounterVec(
+		APIRateLimitsTotal: f.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: namespace,
-				Name:      "unifi_api_rate_limits_total",
-				Help:      "Total number of HTTP 429 rate-limit responses received from UniFi",
+				Name:      "opnsense_api_rate_limits_total",
+				Help:      "Total number of HTTP 429 rate-limit responses received from OPNsense",
 			},
 			[]string{labelProvider, labelOperation},
 		),
@@ -265,6 +249,53 @@ func build(f promauto.Factory, version string) *Metrics {
 				Help:      "Total number of panics caught by the HTTP recovery middleware",
 			},
 			[]string{labelProvider, labelEndpoint},
+		),
+
+		PagesFetchedTotal: f.NewCounterVec(
+			prometheus.CounterOpts{Namespace: namespace, Name: "opnsense_pages_fetched_total",
+				Help: "Total number of searchHostOverride pages fetched"},
+			[]string{labelProvider},
+		),
+		ReadRestartsTotal: f.NewCounterVec(
+			prometheus.CounterOpts{Namespace: namespace, Name: "opnsense_read_restarts_total",
+				Help: "Total number of paginated reads restarted because the table changed mid-read"},
+			[]string{labelProvider},
+		),
+		RowsTotal: f.NewGaugeVec(
+			prometheus.GaugeOpts{Namespace: namespace, Name: "opnsense_rows",
+				Help: "Host override rows in the last accepted snapshot (all rows, before filtering)"},
+			[]string{labelProvider},
+		),
+		ReconfigureTotal: f.NewCounterVec(
+			prometheus.CounterOpts{Namespace: namespace, Name: "opnsense_reconfigure_total",
+				Help: "Total number of Unbound reconfigure calls by result"},
+			[]string{labelProvider, "result"},
+		),
+		PendingReconfigure: f.NewGaugeVec(
+			prometheus.GaugeOpts{Namespace: namespace, Name: "opnsense_pending_reconfigure",
+				Help: "1 while saved configuration has not been applied to the running Unbound"},
+			[]string{labelProvider},
+		),
+		ApplyDuration: f.NewHistogramVec(
+			prometheus.HistogramOpts{Namespace: namespace, Name: "opnsense_apply_duration_seconds",
+				Help:    "Wall time of one ApplyChanges including reconfigure",
+				Buckets: prometheus.ExponentialBuckets(0.5, 2, 9)},
+			[]string{labelProvider},
+		),
+		DeleteBlockedTotal: f.NewCounterVec(
+			prometheus.CounterOpts{Namespace: namespace, Name: "opnsense_delete_blocked_total",
+				Help: "Deletes refused because the row has alias children"},
+			[]string{labelProvider},
+		),
+		EndpointsDroppedTotal: f.NewCounterVec(
+			prometheus.CounterOpts{Namespace: namespace, Name: "opnsense_endpoints_dropped_total",
+				Help: "Desired endpoints dropped in AdjustEndpoints by reason"},
+			[]string{labelProvider, "reason"},
+		),
+		TXTInvalidTotal: f.NewCounterVec(
+			prometheus.CounterOpts{Namespace: namespace, Name: "opnsense_txt_invalid_total",
+				Help: "TXT endpoints refused for length or content"},
+			[]string{labelProvider},
 		),
 
 		ConsecutiveErrors: f.NewGaugeVec(
@@ -307,26 +338,35 @@ func (m *Metrics) RecordHTTPRequest(method, endpoint string, statusCode int, dur
 	}
 }
 
-// RecordUniFiAPICall records UniFi API call metrics.
-func (m *Metrics) RecordUniFiAPICall(operation string, duration time.Duration, responseSize int, err error) {
-	m.UniFiAPIDuration.WithLabelValues(ProviderName, operation).Observe(duration.Seconds())
+// RecordAPICall records OPNsense API call metrics.
+func (m *Metrics) RecordAPICall(operation string, duration time.Duration, responseSize int, err error) {
+	m.APIDuration.WithLabelValues(ProviderName, operation).Observe(duration.Seconds())
 	if responseSize > 0 {
-		m.UniFiResponseSizeBytes.WithLabelValues(operation).Observe(float64(responseSize))
+		m.APIResponseSizeBytes.WithLabelValues(operation).Observe(float64(responseSize))
 	}
 	if err != nil {
-		m.UniFiAPIErrorsTotal.WithLabelValues(ProviderName, operation).Inc()
+		m.APIErrorsTotal.WithLabelValues(ProviderName, operation).Inc()
 	}
+}
+
+// RecordReconfigure counts one Unbound reconfigure attempt by outcome.
+func (m *Metrics) RecordReconfigure(err error) {
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	m.ReconfigureTotal.WithLabelValues(ProviderName, result).Inc()
 }
 
 // RecordOperation records the outcome of one top-level provider operation (a
 // full Records or ApplyChanges). The consecutive-error and last-success gauges
-// are tracked here — per operation — rather than in RecordUniFiAPICall: a
-// single ApplyChanges fans out many concurrent UniFi API calls, and updating
+// are tracked here — per operation — rather than in RecordAPICall: a
+// single ApplyChanges fans out many concurrent OPNsense API calls, and updating
 // these gauges from each of them races. One worker's success could Set the
 // count to 0 while its siblings are still failing, so "consecutive" lost all
 // meaning and an alert on consecutive_errors could silently never fire during a
 // failing batch. Per-operation accounting keeps it honest; per-call failures
-// are still counted unambiguously by UniFiAPIErrorsTotal.
+// are still counted unambiguously by APIErrorsTotal.
 func (m *Metrics) RecordOperation(err error) {
 	if err != nil {
 		m.ConsecutiveErrors.WithLabelValues(ProviderName).Inc()

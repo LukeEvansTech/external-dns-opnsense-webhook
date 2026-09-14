@@ -101,9 +101,9 @@ func newUnifiClient(config *Config) (*httpClient, error) {
 	// the path (.../dns/policies/{uuid}). Every record ever touched then becomes
 	// a permanent series, so the metric grows unbounded (tens of thousands of
 	// series for a few dozen records) until the /metrics payload blows past a
-	// scraper's max-scrape-size and scraping breaks entirely. UniFi API timing
+	// scraper's max-scrape-size and scraping breaks entirely. OPNsense API timing
 	// is already covered, with bounded operation labels, by
-	// externaldns_webhook_unifi_api_duration_seconds (see RecordUniFiAPICall).
+	// externaldns_webhook_opnsense_api_duration_seconds (see RecordAPICall).
 	c := &httpClient{
 		cfg:   config,
 		httpc: &http.Client{Transport: transport},
@@ -195,7 +195,7 @@ func (c *httpClient) GetEndpoints(ctx context.Context) (records []DNSRecord, err
 	start := time.Now()
 	var offset, bodyRead int
 	defer func() {
-		metrics.Get().RecordUniFiAPICall("get_endpoints", time.Since(start), bodyRead, err)
+		metrics.Get().RecordAPICall("get_endpoints", time.Since(start), bodyRead, err)
 	}()
 
 	for {
@@ -238,11 +238,10 @@ func (c *httpClient) CreateEndpoint(ctx context.Context, endpoint *externaldnsen
 	start := time.Now()
 	var bodyRead int
 	defer func() {
-		m.RecordUniFiAPICall("create_endpoint", time.Since(start), bodyRead, err)
+		m.RecordAPICall("create_endpoint", time.Since(start), bodyRead, err)
 	}()
 
 	if endpoint.RecordType == recordTypeCNAME && len(endpoint.Targets) > 1 {
-		m.IgnoredCNAMETargetsTotal.WithLabelValues(metrics.ProviderName).Inc()
 		slog.Warn("ignoring additional CNAME targets; only the first target will be used",
 			"key", endpoint.DNSName, "ignored_targets", endpoint.Targets[1:])
 		endpoint.Targets = endpoint.Targets[:1]
@@ -260,10 +259,6 @@ func (c *httpClient) CreateEndpoint(ctx context.Context, endpoint *externaldnsen
 		n, out, cerr := c.createOne(ctx, r)
 		bodyRead += n
 		if cerr != nil {
-			if isSRVConversionError(cerr) {
-				m.SRVParsingErrorsTotal.WithLabelValues(metrics.ProviderName).Inc()
-			}
-
 			return nil, cerr
 		}
 
@@ -323,7 +318,7 @@ func (c *httpClient) createOne(ctx context.Context, r DNSRecord) (int, *DNSRecor
 func (c *httpClient) DeleteRecord(ctx context.Context, id string) (err error) {
 	start := time.Now()
 	defer func() {
-		metrics.Get().RecordUniFiAPICall("delete_record", time.Since(start), 0, err)
+		metrics.Get().RecordAPICall("delete_record", time.Since(start), 0, err)
 	}()
 
 	u := formatURL(pathPolicy, c.cfg.baseURL(), c.siteID, id)

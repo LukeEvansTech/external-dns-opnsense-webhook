@@ -283,7 +283,7 @@ func TestRecords_ExcludesDisabledRecords(t *testing.T) {
 }
 
 // TestAdjustEndpoints_ClearsTTLForControllerManagedTypes is the #229
-// regression: the UniFi API manages (and ignores a custom) TTL for TXT/MX/SRV,
+// regression: the OPNsense API manages (and ignores a custom) TTL for TXT/MX/SRV,
 // so a user-set TTL on those types must be stripped from the desired set or
 // external-dns churns delete+create forever. A/AAAA/CNAME keep their TTL.
 func TestAdjustEndpoints_ClearsTTLForControllerManagedTypes(t *testing.T) {
@@ -357,18 +357,6 @@ func TestApplyChanges_CNAMEUpdateIsNotAConflict(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	conflicts := metrics.Get().CNAMEConflictsTotal.WithLabelValues(metrics.ProviderName)
-	readConflicts := func() float64 {
-		t.Helper()
-		var m dto.Metric
-		if err := conflicts.Write(&m); err != nil {
-			t.Fatalf("counter.Write: %v", err)
-		}
-
-		return m.GetCounter().GetValue()
-	}
-	before := readConflicts()
-
 	p := &UnifiProvider{client: newTestClient(srv), workers: 1}
 	changes := &plan.Changes{
 		UpdateOld: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL("alias.example.com", "CNAME", 300, "old.target.example.com")},
@@ -383,8 +371,5 @@ func TestApplyChanges_CNAMEUpdateIsNotAConflict(t *testing.T) {
 	}
 	if got := notFoundServed.Load(); got != 0 {
 		t.Errorf("served %d 404s — the stale snapshot was re-deleted", got)
-	}
-	if got := readConflicts() - before; got != 0 {
-		t.Errorf("CNAMEConflictsTotal delta = %v, want 0 (an update is not a conflict)", got)
 	}
 }
