@@ -94,8 +94,11 @@ func (c *Client) retryAfter(op string, resp *http.Response, err error, attempt i
 	return false, 0
 }
 
-// backoff is initial << attempt plus 0..50% jitter, clamped to max, never
-// shorter than a server Retry-After hint.
+// backoff is initial << attempt plus 0..50% jitter, clamped to max. A server
+// Retry-After hint is honoured — the wait is never shorter than it — but only
+// up to OPNSENSE_RETRY_MAX_DELAY: the hint itself is clamped to that ceiling
+// before it can raise the wait, so a large or malicious Retry-After can never
+// push the client past the configured maximum delay.
 func (c *Client) backoff(attempt int, hint time.Duration) time.Duration {
 	initial := cmp.Or(c.cfg.RetryInitialDelay, 500*time.Millisecond)
 	maxDelay := cmp.Or(c.cfg.RetryMaxDelay, 10*time.Second)
@@ -107,15 +110,21 @@ func (c *Client) backoff(attempt int, hint time.Duration) time.Duration {
 	if half := int64(base) / 2; half > 0 {
 		jitter = time.Duration(rand.Int64N(half))
 	}
-	wait := base + jitter
-	if hint > wait {
-		wait = hint
+	if hint > maxDelay {
+		hint = maxDelay
 	}
+	wait := max(base+jitter, hint)
 	if wait > maxDelay {
 		wait = maxDelay
 	}
 	return wait
 }
+
+// maxRetryAfterSeconds caps the numeric Retry-After form at a day: any value
+// this large is already far beyond a sane max delay, and capping it here
+// keeps the later `* time.Second` multiply from overflowing time.Duration's
+// int64 range on a huge or malformed header value.
+const maxRetryAfterSeconds = 86400
 
 func parseRetryAfter(value string) time.Duration {
 	value = strings.TrimSpace(value)
@@ -123,6 +132,9 @@ func parseRetryAfter(value string) time.Duration {
 		return 0
 	}
 	if secs, err := strconv.Atoi(value); err == nil && secs >= 0 {
+		if secs > maxRetryAfterSeconds {
+			secs = maxRetryAfterSeconds
+		}
 		return time.Duration(secs) * time.Second
 	}
 	if when, err := http.ParseTime(value); err == nil {

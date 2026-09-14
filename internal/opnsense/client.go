@@ -50,7 +50,8 @@ const sortAsc = "asc"
 
 // searchSort is the deterministic order for paginated reads. OPNsense appends
 // each row's uuid to the composite key, so ties are broken the same way on
-// every page.
+// every page. encoding/json marshals map keys in sorted order, so the wire
+// order of this map is always fixed: domain, hostname, rr, server.
 var searchSort = map[string]string{"domain": sortAsc, "hostname": sortAsc, "rr": sortAsc, "server": sortAsc}
 
 // Client calls the OPNsense Unbound settings and service API.
@@ -85,6 +86,10 @@ func (c *Client) do(ctx context.Context, op, method, path string, body []byte, d
 		resp, derr := c.once(ctx, op, method, path, body)
 		if derr == nil && resp.StatusCode < 400 {
 			size, err = decodeBody(resp, op, dest)
+			// A body-read or decode failure here is returned as-is, not fed
+			// back into the retry policy: a 2xx with an unreadable or
+			// malformed body signals a data-shape problem (a bug or an API
+			// change), not a transient failure, so retrying it would not help.
 			return err
 		}
 		if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
@@ -192,6 +197,9 @@ func (c *Client) GetHostOverride(ctx context.Context, id string) (hostRow, error
 	if err := c.do(ctx, opGetHostOverride, http.MethodGet, pathGet+id, nil, &out); err != nil {
 		return hostRow{}, err
 	}
+	// getHostOverride answers {} for an unknown uuid rather than a 404, so an
+	// empty hostname and rr together is the only signal that the row does not
+	// exist. This relies on rr being a mandatory field on every real host row.
 	if out.Host.Hostname == "" && out.Host.RR == "" {
 		return hostRow{}, &APIError{Operation: opGetHostOverride, StatusCode: http.StatusNotFound, Message: "no such uuid " + id}
 	}
