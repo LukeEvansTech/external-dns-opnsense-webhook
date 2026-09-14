@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -94,6 +95,61 @@ func TestClient_AuthAndRoundTrip(t *testing.T) {
 	if err != nil || deleted {
 		t.Fatalf("second del: %v %v", err, deleted)
 	}
+}
+
+// TestClient_GetHostOverrideDecodesExpandedOptions replays a real
+// getHostOverride body — the sanitised capture in testdata — through the
+// client, so the expanded option set is resolved on the path production takes
+// rather than only by a json.Unmarshal in the DTO tests. The fake answers in
+// searchHostOverride's flattened shape, which is why this one serves the file
+// verbatim instead.
+func TestClient_GetHostOverrideDecodesExpandedOptions(t *testing.T) {
+	const uuid = "11111111-1111-4111-8111-111111111111"
+	body, err := os.ReadFile("testdata/get_host.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("expanded option set", func(t *testing.T) {
+		var gotPath atomic.Value
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath.Store(r.URL.Path)
+			_, _ = w.Write(body)
+		}))
+		t.Cleanup(srv.Close)
+		row, err := testClient(t, srv.URL).GetHostOverride(context.Background(), uuid)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		// Asserted so that serving the fixture from the wrong path would fail
+		// here rather than pass by answering every request alike.
+		if p, _ := gotPath.Load().(string); p != pathGet+uuid {
+			t.Errorf("path = %q, want %q", p, pathGet+uuid)
+		}
+		if row.RR != recordTypeA {
+			t.Errorf("rr = %q, want %q", row.RR, recordTypeA)
+		}
+		if row.Hostname != "app" || row.Server != "192.0.2.10" {
+			t.Errorf("row = %+v", row)
+		}
+		// The body carries no uuid of its own; the client fills in the one it
+		// asked for.
+		if row.UUID != uuid {
+			t.Errorf("uuid = %q, want %q", row.UUID, uuid)
+		}
+	})
+
+	t.Run("unknown uuid", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{}`))
+		}))
+		t.Cleanup(srv.Close)
+		_, err := testClient(t, srv.URL).GetHostOverride(context.Background(), uuid)
+		aerr, ok := errors.AsType[*APIError](err)
+		if !ok || aerr.StatusCode != http.StatusNotFound {
+			t.Fatalf("err = %v, want *APIError carrying 404", err)
+		}
+	})
 }
 
 func TestClient_WriteErrorCarriesValidations(t *testing.T) {
