@@ -34,15 +34,29 @@ type harness struct {
 	out        bytes.Buffer
 }
 
-func buildBinary(t *testing.T) string {
-	t.Helper()
-	bin := filepath.Join(t.TempDir(), "external-dns-opnsense-webhook")
-	cmd := exec.Command("go", "build", "-o", bin, "../../cmd/external-dns-opnsense-webhook")
+// binPath is the webhook binary every harness runs. Building it is a few
+// seconds and the result is identical for every test, so TestMain builds it
+// once for the package rather than once per test.
+var binPath string
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "e2e-bin")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "creating build dir: %v\n", err)
+		os.Exit(1)
+	}
+	binPath = filepath.Join(dir, "external-dns-opnsense-webhook")
+	cmd := exec.Command("go", "build", "-o", binPath, "../../cmd/external-dns-opnsense-webhook")
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("go build: %v", err)
+		fmt.Fprintf(os.Stderr, "go build: %v\n", err)
+		_ = os.RemoveAll(dir)
+		os.Exit(1)
 	}
-	return bin
+	code := m.Run()
+	// Not deferred: os.Exit below would skip it.
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
 }
 
 func freePort(t *testing.T) int {
@@ -58,12 +72,11 @@ func freePort(t *testing.T) int {
 func newHarness(t *testing.T, extraEnv ...string) *harness {
 	t.Helper()
 	h := &harness{t: t, fake: fake.New(t)}
-	bin := buildBinary(t)
 	wp, hp := freePort(t), freePort(t)
 	h.webhookURL = fmt.Sprintf("http://127.0.0.1:%d", wp)
 	h.healthURL = fmt.Sprintf("http://127.0.0.1:%d", hp)
 	ctx, cancel := context.WithCancel(context.Background())
-	h.cmd = exec.CommandContext(ctx, bin)
+	h.cmd = exec.CommandContext(ctx, binPath)
 	h.cmd.Env = append(os.Environ(),
 		"SERVER_HOST=127.0.0.1", fmt.Sprintf("SERVER_PORT=%d", wp), fmt.Sprintf("HEALTH_SERVER_ADDR=127.0.0.1:%d", hp),
 		"LOG_LEVEL=debug", "LOG_FORMAT=text",

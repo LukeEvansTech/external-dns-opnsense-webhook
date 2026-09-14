@@ -44,6 +44,12 @@ const (
 // rows is under 100 KiB; 8 MiB leaves room for large alias trees.
 var maxResponseBytes int64 = 8 << 20
 
+// maxLocalDataBytes caps listlocaldata, the one endpoint that is not
+// paginated: it dumps every name Unbound serves, host overrides and DHCP
+// leases alike, so its response scales with the whole resolver rather than
+// with this provider's rows. 64 MiB is roughly a million entries.
+const maxLocalDataBytes int64 = 64 << 20
+
 // sortAsc is the ascending sort direction OPNsense's searchHostOverride
 // endpoint expects; every sort field below uses it.
 const sortAsc = "asc"
@@ -71,7 +77,9 @@ func NewClient(cfg *Config) (*Client, error) {
 
 // do issues one operation with the retry policy, returning the decoded
 // body. Every attempt runs under a per-call timeout derived from ctx.
-func (c *Client) do(ctx context.Context, op, method, path string, body []byte, dest any) (err error) {
+// maxBytes caps the response body; all callers pass maxResponseBytes except
+// ListLocalData, whose response is not paginated.
+func (c *Client) do(ctx context.Context, op, method, path string, body []byte, dest any, maxBytes int64) (err error) {
 	start := time.Now()
 	var size int
 	defer func() { metrics.Get().RecordAPICall(op, time.Since(start), size, err) }()
@@ -85,7 +93,7 @@ func (c *Client) do(ctx context.Context, op, method, path string, body []byte, d
 		}
 		resp, derr := c.once(ctx, op, method, path, body)
 		if derr == nil && resp.StatusCode < 400 {
-			size, err = decodeBody(resp, op, dest)
+			size, err = decodeBody(resp, op, dest, maxBytes)
 			// A body-read or decode failure here is returned as-is, not fed
 			// back into the retry policy: a 2xx with an unreadable or
 			// malformed body signals a data-shape problem (a bug or an API
@@ -153,14 +161,14 @@ func (c *cancelOnClose) Close() error {
 	return c.ReadCloser.Close()
 }
 
-func decodeBody(resp *http.Response, op string, dest any) (int, error) {
+func decodeBody(resp *http.Response, op string, dest any, maxBytes int64) (int, error) {
 	defer extdnshttp.DrainAndClose(resp.Body)
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
 		return 0, &DataError{Operation: op, Err: err}
 	}
-	if int64(len(raw)) > maxResponseBytes {
-		return len(raw), &DataError{Operation: op, Err: fmt.Errorf("response exceeds %d bytes", maxResponseBytes)}
+	if int64(len(raw)) > maxBytes {
+		return len(raw), &DataError{Operation: op, Err: fmt.Errorf("response exceeds %d bytes", maxBytes)}
 	}
 	if dest == nil {
 		return len(raw), nil
@@ -184,7 +192,7 @@ func (c *Client) SearchHostOverrides(ctx context.Context, current, rowCount int)
 		return searchPage{}, &DataError{Operation: opSearchHostOverride, Err: err}
 	}
 	var page searchPage
-	if err := c.do(ctx, opSearchHostOverride, http.MethodPost, pathSearch, body, &page); err != nil {
+	if err := c.do(ctx, opSearchHostOverride, http.MethodPost, pathSearch, body, &page, maxResponseBytes); err != nil {
 		return searchPage{}, err
 	}
 	metrics.Get().PagesFetchedTotal.WithLabelValues(metrics.ProviderName).Inc()
@@ -194,7 +202,7 @@ func (c *Client) SearchHostOverrides(ctx context.Context, current, rowCount int)
 // GetHostOverride fetches one row by uuid.
 func (c *Client) GetHostOverride(ctx context.Context, id string) (hostRow, error) {
 	var out getHostResponse
-	if err := c.do(ctx, opGetHostOverride, http.MethodGet, pathGet+id, nil, &out); err != nil {
+	if err := c.do(ctx, opGetHostOverride, http.MethodGet, pathGet+id, nil, &out, maxResponseBytes); err != nil {
 		return hostRow{}, err
 	}
 	// getHostOverride answers {} for an unknown uuid rather than a 404, so an
@@ -214,7 +222,7 @@ func (c *Client) AddHostOverride(ctx context.Context, h hostFields) (string, err
 		return "", &DataError{Operation: opAddHostOverride, Err: err}
 	}
 	var out writeResponse
-	if err := c.do(ctx, opAddHostOverride, http.MethodPost, pathAdd, body, &out); err != nil {
+	if err := c.do(ctx, opAddHostOverride, http.MethodPost, pathAdd, body, &out, maxResponseBytes); err != nil {
 		return "", err
 	}
 	if err := out.err(opAddHostOverride); err != nil {
@@ -230,7 +238,7 @@ func (c *Client) SetHostOverride(ctx context.Context, id string, h hostFields) e
 		return &DataError{Operation: opSetHostOverride, Err: err}
 	}
 	var out writeResponse
-	if err := c.do(ctx, opSetHostOverride, http.MethodPost, pathSet+id, body, &out); err != nil {
+	if err := c.do(ctx, opSetHostOverride, http.MethodPost, pathSet+id, body, &out, maxResponseBytes); err != nil {
 		return err
 	}
 	return out.err(opSetHostOverride)
@@ -240,7 +248,7 @@ func (c *Client) SetHostOverride(ctx context.Context, id string, h hostFields) e
 // returns false when the row was already gone.
 func (c *Client) DelHostOverride(ctx context.Context, id string) (bool, error) {
 	var out writeResponse
-	if err := c.do(ctx, opDelHostOverride, http.MethodPost, pathDel+id, []byte("{}"), &out); err != nil {
+	if err := c.do(ctx, opDelHostOverride, http.MethodPost, pathDel+id, []byte("{}"), &out, maxResponseBytes); err != nil {
 		return false, err
 	}
 	switch out.Result {
@@ -256,7 +264,7 @@ func (c *Client) DelHostOverride(ctx context.Context, id string) (bool, error) {
 // Reconfigure applies the saved configuration to the running Unbound.
 func (c *Client) Reconfigure(ctx context.Context) error {
 	var out statusResponse
-	if err := c.do(ctx, opReconfigure, http.MethodPost, pathReconfigure, []byte("{}"), &out); err != nil {
+	if err := c.do(ctx, opReconfigure, http.MethodPost, pathReconfigure, []byte("{}"), &out, maxResponseBytes); err != nil {
 		return err
 	}
 	if out.Status != "ok" {
@@ -268,7 +276,7 @@ func (c *Client) Reconfigure(ctx context.Context) error {
 // ServiceStatus checks the API answers and Unbound reports a status.
 func (c *Client) ServiceStatus(ctx context.Context) error {
 	var out statusResponse
-	if err := c.do(ctx, opServiceStatus, http.MethodGet, pathStatus, nil, &out); err != nil {
+	if err := c.do(ctx, opServiceStatus, http.MethodGet, pathStatus, nil, &out, maxResponseBytes); err != nil {
 		return err
 	}
 	if out.Status == "" {
@@ -277,10 +285,18 @@ func (c *Client) ServiceStatus(ctx context.Context) error {
 	return nil
 }
 
-// ListLocalData returns what Unbound is currently serving.
+// ListLocalData returns what Unbound is currently serving. Unlike every other
+// read here it is not paginated — one call dumps the whole served table, which
+// includes names this provider never wrote (other host overrides, DHCP
+// registrations) — so it gets maxLocalDataBytes rather than the ordinary cap.
+//
+// A served table larger than that cap fails with a DataError naming the limit,
+// which makes the startup served-state check fail and log its cause. That
+// check is best-effort: it only decides whether to issue one repair
+// reconfigure, so losing it leaves reads and applies working normally.
 func (c *Client) ListLocalData(ctx context.Context) ([]localData, error) {
 	var out localDataResponse
-	if err := c.do(ctx, opListLocalData, http.MethodPost, pathListLocal, []byte("{}"), &out); err != nil {
+	if err := c.do(ctx, opListLocalData, http.MethodPost, pathListLocal, []byte("{}"), &out, maxLocalDataBytes); err != nil {
 		return nil, err
 	}
 	return out.Data, nil

@@ -206,12 +206,23 @@ func (p *Provider) Startup(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, p.cfg.ApplyTimeout)
 	defer cancel()
 	if err := p.client.ServiceStatus(ctx); err != nil {
-		slog.Error("opnsense unreachable at startup; readiness will report the cause", "error", err)
+		logStartupFailure("opnsense unreachable at startup; readiness will report the cause", err)
 		return
 	}
 	if err := p.servedStateCheck(ctx); err != nil {
-		slog.Error("served-state check failed", "error", err)
+		logStartupFailure("served-state check failed", err)
 	}
+}
+
+// logStartupFailure keeps a shutdown out of the error log. ctx is cancelled
+// when the process is signalled, so a Startup still in flight then fails with
+// context.Canceled — expected, not a fault to page anyone about.
+func logStartupFailure(msg string, err error) {
+	if errors.Is(err, context.Canceled) {
+		slog.Info("startup check aborted: shutting down", "during", msg)
+		return
+	}
+	slog.Error(msg, "error", err)
 }
 
 // servedStateCheck compares managed rows in the saved configuration with
@@ -231,6 +242,10 @@ func (p *Provider) servedStateCheck(ctx context.Context) error {
 		have[rowKey{name: normaliseName(d.Name), rr: d.RRType}] = struct{}{}
 	}
 	missing := 0
+	// Only parent rows are checked. OPNsense renders a row and every alias
+	// hanging off it from the same save, so a parent and its aliases are
+	// served or missing together: checking the parent alone cannot miss an
+	// unserved alias, and checking children too would only repeat the verdict.
 	for _, r := range snap.rows { // rows is []*hostRow (pointer-stable since Task 8)
 		if !r.enabled() || bool(r.IsAlias) || r.Description != p.cfg.OwnerMarker {
 			continue
