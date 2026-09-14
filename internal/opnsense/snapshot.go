@@ -23,7 +23,7 @@ type rowKey struct {
 // indexed; disabled rows and children are kept on rows for reads.
 type Snapshot struct {
 	Total    int
-	rows     []hostRow
+	rows     []*hostRow
 	byKey    map[rowKey][]*hostRow
 	byTarget map[rowKey]map[string]*hostRow
 }
@@ -110,10 +110,20 @@ func (c *Client) readAll(ctx context.Context) ([]hostRow, int, error) {
 	return rows, total, nil
 }
 
+// buildSnapshot takes ownership of rows (the caller does not reuse it) and
+// indexes pointers into it, not into s.rows: s.rows is its own []*hostRow,
+// so a later add growing it can never move rows's elements and invalidate
+// the pointers held in byKey/byTarget.
 func buildSnapshot(rows []hostRow, total int) *Snapshot {
-	s := &Snapshot{Total: total, rows: rows, byKey: map[rowKey][]*hostRow{}, byTarget: map[rowKey]map[string]*hostRow{}}
-	for i := range s.rows {
-		s.index(&s.rows[i])
+	s := &Snapshot{
+		Total:    total,
+		rows:     make([]*hostRow, len(rows)),
+		byKey:    map[rowKey][]*hostRow{},
+		byTarget: map[rowKey]map[string]*hostRow{},
+	}
+	for i := range rows {
+		s.rows[i] = &rows[i]
+		s.index(s.rows[i])
 	}
 	return s
 }
@@ -139,15 +149,22 @@ func (s *Snapshot) index(r *hostRow) {
 	s.byTarget[k][r.bareTarget()] = r
 }
 
-// add records a row the apply path just created.
+// add records a row the apply path just created. r is copied onto the heap
+// once (p := &r) and that pointer, not an index into s.rows, is what gets
+// appended and indexed, so a later append growing s.rows never moves it.
 //
 //nolint:unused // consumed by ApplyChanges in a later task
 func (s *Snapshot) add(r hostRow) {
-	s.rows = append(s.rows, r)
-	s.index(&s.rows[len(s.rows)-1])
+	p := &r
+	s.rows = append(s.rows, p)
+	s.index(p)
 }
 
-// remove forgets a row the apply path just deleted.
+// remove forgets a row the apply path just deleted. It compacts byKey[k] in
+// place and clears the now-unused tail so the removed row's pointer is not
+// kept alive by a stale slice element. rowsFor aliases this same backing
+// array, so a caller that deletes while iterating rowsFor's result must
+// iterate a copy, not the slice rowsFor returned.
 //
 //nolint:unused // consumed by ApplyChanges in a later task
 func (s *Snapshot) remove(k rowKey, uuid string) {
@@ -159,23 +176,53 @@ func (s *Snapshot) remove(k rowKey, uuid string) {
 			delete(s.byTarget[k], r.bareTarget())
 		}
 	}
+	clear(s.byKey[k][len(kept):])
 	s.byKey[k] = kept
 }
 
+// rowsFor returns the rows for k. The slice aliases byKey's backing array,
+// which remove compacts in place: a caller that calls remove while iterating
+// this result must iterate a copy instead.
+//
 //nolint:unused // consumed by ApplyChanges in a later task
 func (s *Snapshot) rowsFor(k rowKey) []*hostRow { return s.byKey[k] }
 
+// group accumulates one (name, type) record set while Endpoints folds rows.
+// ttl 0 means unset (hostRow.ttlValue's zero value): an unset row is ignored
+// once any row in the group carries an explicit TTL, so the smallest
+// explicit TTL wins and the group's TTL is 0 only when every row is unset.
+// differs records whether the rows disagreed at all — explicit values that
+// differ from each other, or a mix of unset and explicit — which Endpoints
+// warns about once per key.
 type group struct {
-	targets []string
-	ttl     int64
-	set     bool
+	targets  []string
+	ttl      int64
+	haveTTL  bool
+	sawUnset bool
+	differs  bool
 }
 
 func (g *group) add(target string, ttl int64) {
 	g.targets = append(g.targets, target)
-	if !g.set || ttl < g.ttl {
+	if ttl == 0 {
+		g.sawUnset = true
+		if g.haveTTL {
+			g.differs = true
+		}
+		return
+	}
+	switch {
+	case !g.haveTTL:
 		g.ttl = ttl
-		g.set = true
+		g.haveTTL = true
+		if g.sawUnset {
+			g.differs = true
+		}
+	case ttl != g.ttl:
+		g.differs = true
+		if ttl < g.ttl {
+			g.ttl = ttl
+		}
 	}
 }
 
@@ -191,8 +238,7 @@ func (s *Snapshot) Endpoints() []*endpoint.Endpoint {
 		}
 		groups[k].add(target, ttl)
 	}
-	for i := range s.rows {
-		r := &s.rows[i]
+	for _, r := range s.rows {
 		if !r.enabled() || bool(r.IsAlias) {
 			continue
 		}
@@ -204,6 +250,12 @@ func (s *Snapshot) Endpoints() []*endpoint.Endpoint {
 		}
 		name := joinName(r.Hostname, r.Domain)
 		put(name, r.RR, r.target(), r.ttlValue())
+		// Every _children entry is emitted as a record of its parent's type
+		// at the alias name: DESIGN 6.1 only spells this out for A/AAAA
+		// parents, but unbound.inc renders an alias as a copy of whatever
+		// row it hangs off, TXT and MX included, so this loop does the same
+		// for every rr this provider maps (the switch above already limited
+		// r.RR to that set).
 		for _, child := range r.Children {
 			if !child.enabled() {
 				continue
@@ -232,6 +284,9 @@ func (s *Snapshot) Endpoints() []*endpoint.Endpoint {
 	for _, k := range keys {
 		g := groups[k]
 		sort.Strings(g.targets)
+		if g.differs {
+			slog.Warn("grouped rows have different TTLs; using the smallest explicit value", "name", k.name, "rr", k.rr, "ttl", g.ttl)
+		}
 		out = append(out, endpoint.NewEndpointWithTTL(k.name, k.rr, endpoint.TTL(g.ttl), g.targets...))
 	}
 	return out
