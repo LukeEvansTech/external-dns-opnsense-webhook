@@ -135,6 +135,12 @@ func (r *hostRow) bareTarget() string {
 	return r.Server
 }
 
+// index files a row under its (name, type) key. Disabled rows and alias
+// children are deliberately left out: neither is served, so neither should
+// satisfy a desired target. The cost is one duplicate: a disabled row sitting
+// at a managed name is invisible to the apply path, which creates an enabled
+// row beside it; the next read sees both and converges, and the disabled row
+// is left for an operator to remove.
 func (s *Snapshot) index(r *hostRow) {
 	if !r.enabled() || bool(r.IsAlias) {
 		return

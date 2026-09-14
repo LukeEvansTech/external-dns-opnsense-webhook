@@ -3,12 +3,29 @@ package opnsense
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
+	"strings"
 	"testing"
 
+	"github.com/LukeEvansTech/external-dns-opnsense-webhook/internal/metrics"
 	"github.com/LukeEvansTech/external-dns-opnsense-webhook/test/fake"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/plan"
 )
+
+// gaugeValue reads one gauge through the dto round-trip, as the metrics
+// package's own tests do.
+func gaugeValue(t *testing.T, g prometheus.Gauge) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := g.Write(&m); err != nil {
+		t.Fatalf("gauge.Write: %v", err)
+	}
+	return m.GetGauge().GetValue()
+}
 
 const label = `"heritage=external-dns,external-dns/owner=main,external-dns/resource=gateway-httproute/network/app"`
 
@@ -43,28 +60,43 @@ func rowsByKind(f *fake.Server) (a, txt []fake.Row) {
 	return a, txt
 }
 
-func TestApply_CreateOrdersTXTBeforeA(t *testing.T) {
-	f := fake.New(t)
-	p := testProvider(t, f)
-	changes := &plan.Changes{Create: []*endpoint.Endpoint{
-		ep("app.example.com", "A", 0, "192.0.2.1"),
-		ep("k8s.main.a-app.example.com", "TXT", 0, label),
-	}}
-	// Phase order: the TXT add is the first add call, the A add the second.
-	f.Inject(fake.Fault{Op: fake.OpAddHostOverride, Status: 500, Times: 1, SkipCalls: 1})
-	err := p.ApplyChanges(context.Background(), changes)
-	a, txt := rowsByKind(f)
-	if err == nil || len(txt) != 1 || len(a) != 0 {
-		t.Fatalf("err=%v A=%d TXT=%d; want TXT written, A failed", err, len(a), len(txt))
-	}
-	if f.Reconfigures() != 1 {
-		t.Errorf("reconfigures = %d, want 1 after a partial write", f.Reconfigures())
-	}
-	if err := p.ApplyChanges(context.Background(), changes); err != nil {
-		t.Fatalf("second apply: %v", err)
-	}
-	if a, txt := rowsByKind(f); len(a) != 1 || len(txt) != 1 {
-		t.Errorf("after second apply: A=%d TXT=%d", len(a), len(txt))
+// dataTypes drives the A/AAAA table: the two record types the provider writes
+// into a server field, which must behave identically apart from the value.
+var dataTypes = []struct{ rr, first, second string }{
+	{"A", "192.0.2.1", "192.0.2.2"},
+	{"AAAA", "2001:db8::1", "2001:db8::2"},
+}
+
+func TestApply_CreateOrdersTXTBeforeData(t *testing.T) {
+	for _, tc := range dataTypes {
+		t.Run(tc.rr, func(t *testing.T) {
+			f := fake.New(t)
+			p := testProvider(t, f)
+			changes := &plan.Changes{Create: []*endpoint.Endpoint{
+				ep("app.example.com", tc.rr, 0, tc.first),
+				ep("k8s.main.a-app.example.com", "TXT", 0, label),
+			}}
+			// Phase order: the TXT add is the first add call, the data add the second.
+			f.Inject(fake.Fault{Op: fake.OpAddHostOverride, Status: 500, Times: 1, SkipCalls: 1})
+			err := p.ApplyChanges(context.Background(), changes)
+			a, txt := rowsByKind(f)
+			if err == nil || len(txt) != 1 || len(a) != 0 {
+				t.Fatalf("err=%v data=%d TXT=%d; want TXT written, data failed", err, len(a), len(txt))
+			}
+			if f.Reconfigures() != 1 {
+				t.Errorf("reconfigures = %d, want 1 after a partial write", f.Reconfigures())
+			}
+			if err := p.ApplyChanges(context.Background(), changes); err != nil {
+				t.Fatalf("second apply: %v", err)
+			}
+			a, txt = rowsByKind(f)
+			if len(a) != 1 || len(txt) != 1 {
+				t.Fatalf("after second apply: data=%d TXT=%d", len(a), len(txt))
+			}
+			if a[0].RR != tc.rr || a[0].Server != tc.first {
+				t.Errorf("data row = %+v", a[0])
+			}
+		})
 	}
 }
 
@@ -95,27 +127,31 @@ func TestApply_DeleteOrder(t *testing.T) {
 }
 
 func TestApply_UpdateInPlaceKeepsUUIDAndChildren(t *testing.T) {
-	f := fake.New(t)
-	id := f.AddRow(fake.Row{Hostname: "app", Domain: "example.com", RR: "A", Server: "192.0.2.1", Description: "external-dns"})
-	f.AddAlias(id, "www", "")
-	f.AddRow(fake.Row{Hostname: "k8s.main.a-app", Domain: "example.com", RR: "TXT", TXTData: stripTXTQuotes(label), Description: "external-dns"})
-	p := testProvider(t, f)
-	changes := &plan.Changes{
-		UpdateOld: []*endpoint.Endpoint{ep("app.example.com", "A", 0, "192.0.2.1")},
-		UpdateNew: []*endpoint.Endpoint{ep("app.example.com", "A", 300, "192.0.2.2")},
-	}
-	if err := p.ApplyChanges(context.Background(), changes); err != nil {
-		t.Fatalf("apply: %v", err)
-	}
-	a, txt := rowsByKind(f)
-	if len(a) != 1 || a[0].UUID != id || a[0].Server != "192.0.2.2" || a[0].TTL != "300" {
-		t.Errorf("A row = %+v", a)
-	}
-	if len(txt) != 1 || len(f.Aliases()) != 1 {
-		t.Errorf("TXT=%d aliases=%d; want both untouched", len(txt), len(f.Aliases()))
-	}
-	if f.Hits(fake.OpSet) != 1 || f.Hits(fake.OpDel) != 0 || f.Hits(fake.OpAddHostOverride) != 0 {
-		t.Errorf("set=%d del=%d add=%d", f.Hits(fake.OpSet), f.Hits(fake.OpDel), f.Hits(fake.OpAddHostOverride))
+	for _, tc := range dataTypes {
+		t.Run(tc.rr, func(t *testing.T) {
+			f := fake.New(t)
+			id := f.AddRow(fake.Row{Hostname: "app", Domain: "example.com", RR: tc.rr, Server: tc.first, Description: "external-dns"})
+			f.AddAlias(id, "www", "")
+			f.AddRow(fake.Row{Hostname: "k8s.main.a-app", Domain: "example.com", RR: "TXT", TXTData: stripTXTQuotes(label), Description: "external-dns"})
+			p := testProvider(t, f)
+			changes := &plan.Changes{
+				UpdateOld: []*endpoint.Endpoint{ep("app.example.com", tc.rr, 0, tc.first)},
+				UpdateNew: []*endpoint.Endpoint{ep("app.example.com", tc.rr, 300, tc.second)},
+			}
+			if err := p.ApplyChanges(context.Background(), changes); err != nil {
+				t.Fatalf("apply: %v", err)
+			}
+			a, txt := rowsByKind(f)
+			if len(a) != 1 || a[0].UUID != id || a[0].Server != tc.second || a[0].TTL != "300" {
+				t.Errorf("data row = %+v", a)
+			}
+			if len(txt) != 1 || len(f.Aliases()) != 1 {
+				t.Errorf("TXT=%d aliases=%d; want both untouched", len(txt), len(f.Aliases()))
+			}
+			if f.Hits(fake.OpSet) != 1 || f.Hits(fake.OpDel) != 0 || f.Hits(fake.OpAddHostOverride) != 0 {
+				t.Errorf("set=%d del=%d add=%d", f.Hits(fake.OpSet), f.Hits(fake.OpDel), f.Hits(fake.OpAddHostOverride))
+			}
+		})
 	}
 }
 
@@ -342,5 +378,179 @@ func TestApply_PendingRepairedByEmptyApply(t *testing.T) {
 	}
 	if p.pending.Load() || f.Reconfigures() != 1 || len(f.Served()) != 1 {
 		t.Errorf("pending=%v reconfigures=%d served=%d", p.pending.Load(), f.Reconfigures(), len(f.Served()))
+	}
+	// The flag and the gauge an operator alerts on must agree.
+	if got := gaugeValue(t, metrics.Get().PendingReconfigure.WithLabelValues(metrics.ProviderName)); got != 0 {
+		t.Errorf("opnsense_pending_reconfigure = %v, want 0", got)
+	}
+}
+
+// TestApply_TXTFailureKeepsExistingDataRows is the removal half of the phase
+// gate: skipping the data add/set phase must not leave the data remove phase
+// treating rows as surplus, or a failed TXT write would take the live data
+// rows with it.
+func TestApply_TXTFailureKeepsExistingDataRows(t *testing.T) {
+	f := fake.New(t)
+	f.AddRow(fake.Row{Hostname: "app", Domain: "example.com", RR: "A", Server: "192.0.2.1", Description: "external-dns"})
+	p := testProvider(t, f)
+	changes := &plan.Changes{
+		Create:    []*endpoint.Endpoint{ep("k8s.main.a-app.example.com", "TXT", 0, label)},
+		UpdateOld: []*endpoint.Endpoint{ep("app.example.com", "A", 0, "192.0.2.1")},
+		UpdateNew: []*endpoint.Endpoint{ep("app.example.com", "A", 0, "192.0.2.2")},
+	}
+	// The TXT add is the first add call; its failure gates the data phase out.
+	f.Inject(fake.Fault{Op: fake.OpAddHostOverride, Status: 500, Times: 1})
+	err := p.ApplyChanges(context.Background(), changes)
+	if err == nil {
+		t.Fatal("expected the failed TXT create to surface as an error")
+	}
+	if f.Hits(fake.OpDel) != 0 {
+		t.Errorf("del=%d; the gated-out phase's rows must not be removed", f.Hits(fake.OpDel))
+	}
+	a, txt := rowsByKind(f)
+	if len(a) != 1 || a[0].Server != "192.0.2.1" || len(txt) != 0 {
+		t.Fatalf("data=%+v TXT=%d; want the live row untouched", a, len(txt))
+	}
+	if err := p.ApplyChanges(context.Background(), changes); err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	a, txt = rowsByKind(f)
+	if len(a) != 1 || a[0].Server != "192.0.2.2" || len(txt) != 1 {
+		t.Errorf("after second apply: data=%+v TXT=%d", a, len(txt))
+	}
+}
+
+func TestApply_RejectsUnwritablePlans(t *testing.T) {
+	cases := []struct {
+		name    string
+		changes *plan.Changes
+		want    string
+	}{
+		{
+			// A create with nothing to point at cannot become a row, and an
+			// empty desired set would read as "delete everything at this name".
+			name:    "zeroTargetCreate",
+			changes: &plan.Changes{Create: []*endpoint.Endpoint{ep("app.example.com", "A", 0)}},
+			want:    "no targets",
+		},
+		{
+			name: "conflictingCreates",
+			changes: &plan.Changes{Create: []*endpoint.Endpoint{
+				ep("app.example.com", "A", 0, "192.0.2.1"),
+				ep("app.example.com", "A", 0, "192.0.2.9"),
+			}},
+			want: "two ways",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := fake.New(t)
+			p := testProvider(t, f)
+			err := p.ApplyChanges(context.Background(), tc.changes)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want one mentioning %q", err, tc.want)
+			}
+			if len(f.Rows()) != 0 || f.Reconfigures() != 0 {
+				t.Errorf("rows=%d reconfigures=%d; want nothing written", len(f.Rows()), f.Reconfigures())
+			}
+		})
+	}
+}
+
+// TestApply_TXTOnlyPlan exercises the phases the other tests always populate:
+// with no data keys, phases 2 and 3 select nothing and must still leave the
+// TXT phases free to run.
+func TestApply_TXTOnlyPlan(t *testing.T) {
+	f := fake.New(t)
+	p := testProvider(t, f)
+	create := &plan.Changes{Create: []*endpoint.Endpoint{ep("k8s.main.a-app.example.com", "TXT", 0, label)}}
+	if err := p.ApplyChanges(context.Background(), create); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, txt := rowsByKind(f); len(txt) != 1 {
+		t.Fatalf("TXT rows = %d after create", len(txt))
+	}
+	del := &plan.Changes{Delete: []*endpoint.Endpoint{ep("k8s.main.a-app.example.com", "TXT", 0, label)}}
+	if err := p.ApplyChanges(context.Background(), del); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if len(f.Rows()) != 0 {
+		t.Errorf("rows = %d after delete, want 0", len(f.Rows()))
+	}
+	if f.Reconfigures() != 2 {
+		t.Errorf("reconfigures = %d, want 2", f.Reconfigures())
+	}
+}
+
+// TestApply_WorkersOneAndFourConverge runs the same plan serially and with the
+// default fan-out. The end state and the call counts must not depend on the
+// worker count; run under -race, it is also what exercises the shared snapshot
+// index from several goroutines at once.
+func TestApply_WorkersOneAndFourConverge(t *testing.T) {
+	const keys = 6
+	fingerprint := func(f *fake.Server) []string {
+		out := make([]string, 0, len(f.Rows()))
+		for _, r := range f.Rows() {
+			out = append(out, fmt.Sprintf("%s|%s.%s|%s|%s|%s|%s|%s",
+				r.RR, r.Hostname, r.Domain, r.Server, r.TXTData, r.TTL, r.AddPTR, r.Description))
+		}
+		sort.Strings(out)
+		return out
+	}
+	counts := func(f *fake.Server) map[string]int {
+		return map[string]int{
+			"add":         f.Hits(fake.OpAddHostOverride),
+			"set":         f.Hits(fake.OpSet),
+			"del":         f.Hits(fake.OpDel),
+			"search":      f.Hits(fake.OpSearch),
+			"reconfigure": f.Reconfigures(),
+		}
+	}
+	build := func(del bool) *plan.Changes {
+		eps := make([]*endpoint.Endpoint, 0, 2*keys)
+		for i := range keys {
+			eps = append(eps,
+				ep(fmt.Sprintf("app%d.example.com", i), "A", 300, fmt.Sprintf("192.0.2.%d", i+1)),
+				ep(fmt.Sprintf("k8s.main.a-app%d.example.com", i), "TXT", 0, fmt.Sprintf(`"owner=main,n=%d"`, i)))
+		}
+		if del {
+			return &plan.Changes{Delete: eps}
+		}
+		return &plan.Changes{Create: eps}
+	}
+
+	type outcome struct {
+		rows  []string
+		hits  map[string]int
+		final int
+	}
+	run := func(t *testing.T, workers int) outcome {
+		t.Helper()
+		f := fake.New(t)
+		p := testProvider(t, f)
+		p.cfg.ApplyWorkers = workers
+		if err := p.ApplyChanges(context.Background(), build(false)); err != nil {
+			t.Fatalf("create with %d workers: %v", workers, err)
+		}
+		if len(f.Rows()) != 2*keys {
+			t.Fatalf("rows = %d with %d workers, want %d", len(f.Rows()), workers, 2*keys)
+		}
+		got := outcome{rows: fingerprint(f)}
+		if err := p.ApplyChanges(context.Background(), build(true)); err != nil {
+			t.Fatalf("delete with %d workers: %v", workers, err)
+		}
+		got.hits, got.final = counts(f), len(f.Rows())
+		return got
+	}
+
+	one, four := run(t, 1), run(t, 4)
+	if strings.Join(one.rows, "\n") != strings.Join(four.rows, "\n") {
+		t.Errorf("rows differ by worker count:\n1: %v\n4: %v", one.rows, four.rows)
+	}
+	if fmt.Sprint(one.hits) != fmt.Sprint(four.hits) {
+		t.Errorf("call counts differ by worker count: 1=%v 4=%v", one.hits, four.hits)
+	}
+	if one.final != 0 || four.final != 0 {
+		t.Errorf("rows left after delete: 1=%d 4=%d", one.final, four.final)
 	}
 }

@@ -15,15 +15,20 @@ import (
 )
 
 // desiredSet is the target set one (name, type) should end up with. TXT
-// targets are stored bare (quotes stripped) so they compare with rows.
+// targets are stored bare (quotes stripped) so they compare with rows. host
+// and domain are the key's name split against the configured domains, done
+// once here so the converge path never has to repeat it.
 type desiredSet struct {
 	key     rowKey
+	host    string
+	domain  string
 	targets map[string]struct{}
 	ttl     int64
-	// failed records that the add/set phase for this key could not write
-	// every desired target. The remove phase then leaves the key's surplus
-	// rows alone: dropping them would shrink a record set the plan meant to
-	// grow or replace, and could leave the name resolving to nothing.
+	// failed records that the add/set phase for this key did not write every
+	// desired target, either because a write failed or because the phase was
+	// gated out. The remove phase then leaves the key's surplus rows alone:
+	// dropping them would shrink a record set the plan meant to grow or
+	// replace, and could leave the name resolving to nothing.
 	failed bool
 }
 
@@ -33,6 +38,17 @@ const (
 	modeAddSet convergeMode = iota
 	modeRemove
 )
+
+// Phase indices into applyPhases; gatedOn refers to them by name.
+const (
+	phaseTXTAdd = iota
+	phaseDataAdd
+	phaseDataRemove
+	phaseTXTRemove
+)
+
+// noGate marks a phase that runs unconditionally.
+const noGate = -1
 
 func isTXT(rr string) bool  { return rr == recordTypeTXT }
 func isData(rr string) bool { return rr != recordTypeTXT }
@@ -48,26 +64,24 @@ func isData(rr string) bool { return rr != recordTypeTXT }
 // are still there would strand them the same way. A gated-out phase is skipped
 // for this cycle and converges on the next one, once the protective phase has
 // succeeded. The protective phases themselves always run.
-var applyPhases = []struct {
+var applyPhases = [...]struct {
 	selects func(rr string) bool
 	mode    convergeMode
 	gatedOn int
 	skip    string
 }{
-	{isTXT, modeAddSet, noGate, ""},
-	{isData, modeAddSet, 0, "skipping data creates: TXT writes failed this cycle"},
-	{isData, modeRemove, noGate, ""},
-	{isTXT, modeRemove, 2, "skipping TXT removes: data deletes failed this cycle"},
+	phaseTXTAdd:     {isTXT, modeAddSet, noGate, ""},
+	phaseDataAdd:    {isData, modeAddSet, phaseTXTAdd, "skipping data creates: TXT writes failed this cycle"},
+	phaseDataRemove: {isData, modeRemove, noGate, ""},
+	phaseTXTRemove:  {isTXT, modeRemove, phaseDataRemove, "skipping TXT removes: data deletes failed this cycle"},
 }
-
-// noGate marks a phase that runs unconditionally.
-const noGate = -1
 
 // applyRun is the mutable state of one ApplyChanges. mu guards all of it, the
 // snapshot index included: several keys converge concurrently and every one of
-// them can add or remove rows.
+// them can add or remove rows. Nothing reads a field of this struct without
+// taking mu; the accessors below are the only way in.
 //
-// The rows themselves are read and written outside mu. That is safe because a
+// The snapshot's rows are read and written outside mu. That is safe because a
 // phase gives each rowKey to exactly one goroutine, and a row belongs to
 // exactly one rowKey, so no two workers ever touch the same *hostRow; only the
 // index they hang off is shared, and every path into it takes mu.
@@ -93,18 +107,16 @@ func (r *applyRun) fail(set *desiredSet, err error) {
 	set.failed = true
 }
 
-// startPhase clears the per-phase failure count; endPhase reports it once the
-// phase has drained.
-func (r *applyRun) startPhase() {
+// markFailed records that a key's desired targets were never attempted — the
+// phase that would have written them was gated out. A key with no targets is
+// a delete and is left alone: its removal is the whole point of the plan and
+// nothing protective was skipped on its behalf.
+func (r *applyRun) markFailed(set *desiredSet) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.phaseFailed = 0
-}
-
-func (r *applyRun) endPhase() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.phaseFailed
+	if len(set.targets) > 0 {
+		set.failed = true
+	}
 }
 
 func (r *applyRun) didFail(set *desiredSet) bool {
@@ -122,6 +134,39 @@ func (r *applyRun) markWrite() {
 		r.wrote = true
 		r.p.setPending(true)
 	}
+}
+
+func (r *applyRun) didWrite() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.wrote
+}
+
+func (r *applyRun) addErr(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.errs = append(r.errs, err)
+}
+
+// err joins everything collected during the run.
+func (r *applyRun) err() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return errors.Join(r.errs...)
+}
+
+// startPhase clears the per-phase failure count; endPhase reports it once the
+// phase has drained.
+func (r *applyRun) startPhase() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.phaseFailed = 0
+}
+
+func (r *applyRun) endPhase() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.phaseFailed
 }
 
 // rows copies the snapshot's rows for k. The copy matters: removeRow compacts
@@ -147,9 +192,14 @@ func (r *applyRun) removeRow(k rowKey, uuid string) {
 
 // retarget records a write the firewall accepted against the snapshot row, so
 // a later phase sees the row as it now is rather than as it was read. byKey is
-// the only index the apply path consults and its key (name, rr) is unchanged
-// by a write, so nothing needs reindexing.
-func (r *applyRun) retarget(row *hostRow, f hostFields) {
+// the only index the apply path consults, and a write never moves a row
+// between keys — the panic below states that invariant rather than trusting
+// it, because a row that silently changed key would be indexed under the old
+// one and leak past every later phase.
+func (r *applyRun) retarget(k rowKey, row *hostRow, f hostFields) {
+	if got := (rowKey{name: joinName(f.Hostname, f.Domain), rr: f.RR}); got != k {
+		panic(fmt.Sprintf("opnsense: write would move row %s from %v to %v", row.UUID, k, got))
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	row.Hostname, row.Domain, row.RR = f.Hostname, f.Domain, f.RR
@@ -161,38 +211,61 @@ func (r *applyRun) retarget(row *hostRow, f hostFields) {
 // UpdateNew define the set, Delete empties it; UpdateOld describes the state
 // being replaced and is read from the snapshot instead. Endpoints that fail
 // validation are reported and skipped; nothing else in the plan is affected.
+//
+// Two endpoints can name the same key. Identical content is harmless — the
+// second is simply redundant — but two that disagree describe a plan with no
+// single answer, so both are dropped with an error rather than letting
+// whichever the map iteration reached last silently win.
 func (p *Provider) foldChanges(changes *plan.Changes) (map[rowKey]*desiredSet, []error) {
 	sets := map[rowKey]*desiredSet{}
+	conflicted := map[rowKey]bool{}
 	var errs []error
+
 	define := func(e *endpoint.Endpoint, empty bool) {
 		name := normaliseName(e.DNSName)
-		if _, _, err := splitName(name, p.cfg.Domains); err != nil {
+		host, domain, err := splitName(name, p.cfg.Domains)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("%s %s: %w", e.RecordType, name, err))
 			return
 		}
+		if !empty && len(e.Targets) == 0 {
+			errs = append(errs, fmt.Errorf("%s %s: no targets", e.RecordType, name))
+			return
+		}
 		k := rowKey{name: name, rr: e.RecordType}
-		set := &desiredSet{key: k, targets: map[string]struct{}{}, ttl: clampTTL(e.RecordTTL)}
-		if !empty {
-			for _, t := range e.Targets {
-				switch e.RecordType {
-				case recordTypeA, recordTypeAAAA:
-					set.targets[t] = struct{}{}
-				case recordTypeTXT:
-					bare, err := validateTXT(t)
-					if err != nil {
-						metrics.Get().TXTInvalidTotal.WithLabelValues(metrics.ProviderName).Inc()
-						errs = append(errs, fmt.Errorf("TXT %s: %w", name, err))
-						return
-					}
-					set.targets[bare] = struct{}{}
-				default:
-					errs = append(errs, fmt.Errorf("%s %s: %w", e.RecordType, name, ErrUnsupportedType))
+		if conflicted[k] {
+			return
+		}
+		set := &desiredSet{key: k, host: host, domain: domain, targets: map[string]struct{}{}, ttl: clampTTL(e.RecordTTL)}
+		for _, t := range e.Targets {
+			if empty {
+				break
+			}
+			switch e.RecordType {
+			case recordTypeA, recordTypeAAAA:
+				set.targets[t] = struct{}{}
+			case recordTypeTXT:
+				bare, terr := validateTXT(t)
+				if terr != nil {
+					metrics.Get().TXTInvalidTotal.WithLabelValues(metrics.ProviderName).Inc()
+					errs = append(errs, fmt.Errorf("TXT %s: %w", name, terr))
 					return
 				}
+				set.targets[bare] = struct{}{}
+			default:
+				errs = append(errs, fmt.Errorf("%s %s: %w", e.RecordType, name, ErrUnsupportedType))
+				return
 			}
+		}
+		if prev, dup := sets[k]; dup && !sameSet(prev, set) {
+			errs = append(errs, fmt.Errorf("%s %s: the plan describes this record two ways", e.RecordType, name))
+			delete(sets, k)
+			conflicted[k] = true
+			return
 		}
 		sets[k] = set
 	}
+
 	for _, e := range changes.Delete {
 		define(e, true)
 	}
@@ -203,6 +276,19 @@ func (p *Provider) foldChanges(changes *plan.Changes) (map[rowKey]*desiredSet, [
 		define(e, false)
 	}
 	return sets, errs
+}
+
+// sameSet reports whether two definitions of one key ask for the same thing.
+func sameSet(a, b *desiredSet) bool {
+	if a.ttl != b.ttl || len(a.targets) != len(b.targets) {
+		return false
+	}
+	for t := range a.targets {
+		if _, ok := b.targets[t]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // apply runs the four phases from the design: TXT add/set, data add/set, data
@@ -224,18 +310,26 @@ func (p *Provider) apply(ctx context.Context, changes *plan.Changes) error {
 
 	failures := make([]int, len(applyPhases))
 	for i, ph := range applyPhases {
+		selected := make([]*desiredSet, 0, len(keys))
+		for _, k := range keys {
+			if ph.selects(k.rr) {
+				selected = append(selected, sets[k])
+			}
+		}
 		if ph.gatedOn != noGate && failures[ph.gatedOn] > 0 {
-			slog.Warn(ph.skip, "failures", failures[ph.gatedOn])
+			slog.Warn(ph.skip, "failures", failures[ph.gatedOn], "keys", len(selected))
+			// The targets this phase would have written were never attempted,
+			// so the matching remove phase must not treat the rows they were
+			// meant to replace as surplus.
+			for _, set := range selected {
+				run.markFailed(set)
+			}
 			continue
 		}
 		run.startPhase()
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(p.cfg.ApplyWorkers)
-		for _, k := range keys {
-			if !ph.selects(k.rr) {
-				continue
-			}
-			set := sets[k]
+		for _, set := range selected {
 			g.Go(func() error {
 				if cerr := p.converge(gctx, run, set, ph.mode); cerr != nil {
 					run.fail(set, cerr)
@@ -252,31 +346,27 @@ func (p *Provider) apply(ctx context.Context, changes *plan.Changes) error {
 	// A write attempt, committed or not, means saved and served may differ; so
 	// does a reconfigure an earlier apply could not complete. Either way the
 	// firewall is reloaded here rather than left waiting for the next read.
-	if run.wrote || p.pending.Load() {
-		if rerr := p.reconfigure(); rerr != nil {
-			run.errs = append(run.errs, fmt.Errorf("reconfigure: %w", rerr))
+	if run.didWrite() || p.pending.Load() {
+		if rerr := p.reconfigure(false); rerr != nil {
+			run.addErr(fmt.Errorf("reconfigure: %w", rerr))
 		}
 	}
-	return errors.Join(run.errs...)
+	return run.err()
 }
 
 // converge brings one key's rows towards its desired set in the given mode.
 func (p *Provider) converge(ctx context.Context, run *applyRun, set *desiredSet, mode convergeMode) error {
-	host, domain, err := splitName(set.key.name, p.cfg.Domains)
-	if err != nil {
-		return err
-	}
 	existing := run.rows(set.key)
 	if mode == modeRemove {
 		return p.removeSurplus(ctx, run, set, existing)
 	}
-	return p.addSet(ctx, run, set, host, domain, existing)
+	return p.addSet(ctx, run, set, existing)
 }
 
 // addSet makes every desired target present: rows already carrying one are
 // brought into line, rows the plan no longer wants are reused for the targets
 // that have none, and only what is still missing is created.
-func (p *Provider) addSet(ctx context.Context, run *applyRun, set *desiredSet, host, domain string, existing []*hostRow) error {
+func (p *Provider) addSet(ctx context.Context, run *applyRun, set *desiredSet, existing []*hostRow) error {
 	byTarget := make(map[string]*hostRow, len(existing))
 	for _, r := range existing {
 		byTarget[r.bareTarget()] = r
@@ -288,7 +378,7 @@ func (p *Provider) addSet(ctx context.Context, run *applyRun, set *desiredSet, h
 		if !ok {
 			continue
 		}
-		f := p.fields(host, domain, set.key.rr, t, set.ttl)
+		f := p.fields(set, t)
 		if r.ttlValue() == set.ttl && r.Description == f.Description && r.AddPTR == f.AddPTR {
 			continue
 		}
@@ -324,13 +414,12 @@ func (p *Provider) addSet(ctx context.Context, run *applyRun, set *desiredSet, h
 	}
 	reused := min(len(missing), len(surplus))
 	for i := range reused {
-		f := p.fields(host, domain, set.key.rr, missing[i], set.ttl)
-		if err := p.setRow(ctx, run, set.key, surplus[i], f, missing[i]); err != nil {
+		if err := p.setRow(ctx, run, set.key, surplus[i], p.fields(set, missing[i]), missing[i]); err != nil {
 			return err
 		}
 	}
 	for _, t := range missing[reused:] {
-		if err := p.createRow(ctx, run, set.key, p.fields(host, domain, set.key.rr, t, set.ttl), t); err != nil {
+		if err := p.createRow(ctx, run, set.key, p.fields(set, t), t); err != nil {
 			return err
 		}
 	}
@@ -338,6 +427,11 @@ func (p *Provider) addSet(ctx context.Context, run *applyRun, set *desiredSet, h
 }
 
 // removeSurplus deletes the key's rows the desired set no longer names.
+//
+// A blocked row stops the whole key rather than only itself. That is
+// deliberate: a name whose rows carry hand-made aliases freezes in its current
+// shape until an operator deals with the alias, which is safer than shrinking
+// the record set halfway and serving an answer nobody asked for.
 func (p *Provider) removeSurplus(ctx context.Context, run *applyRun, set *desiredSet, existing []*hostRow) error {
 	if len(set.targets) > 0 && run.didFail(set) {
 		slog.Warn("keeping surplus rows after a failed converge", "name", set.key.name, "type", set.key.rr)
@@ -371,9 +465,9 @@ func (p *Provider) removeSurplus(ctx context.Context, run *applyRun, set *desire
 func (p *Provider) setRow(ctx context.Context, run *applyRun, k rowKey, r *hostRow, f hostFields, target string) error {
 	run.markWrite()
 	if err := p.client.SetHostOverride(ctx, r.UUID, f); err != nil {
-		return fmt.Errorf("set %s %s -> %s: %w", k.rr, k.name, target, err)
+		return fmt.Errorf("set %s %s -> %s (%s): %w", k.rr, k.name, target, r.UUID, err)
 	}
-	run.retarget(r, f)
+	run.retarget(k, r, f)
 	metrics.Get().RecordChange("update", k.rr)
 	slog.Info("updated override", "name", k.name, "type", k.rr, "target", target, "uuid", r.UUID)
 	return nil
@@ -404,13 +498,16 @@ func hasEnabledChildren(r *hostRow) bool {
 	return false
 }
 
-// fields builds the write body for one row.
-func (p *Provider) fields(host, domain, rr, target string, ttl int64) hostFields {
-	f := hostFields{Enabled: "1", Hostname: host, Domain: domain, RR: rr, TTL: ttlField(ttl), AddPTR: "0", Description: p.cfg.OwnerMarker}
+// fields builds the write body for one of the set's targets.
+func (p *Provider) fields(set *desiredSet, target string) hostFields {
+	f := hostFields{
+		Enabled: "1", Hostname: set.host, Domain: set.domain, RR: set.key.rr,
+		TTL: ttlField(set.ttl), AddPTR: "0", Description: p.cfg.OwnerMarker,
+	}
 	if p.cfg.AddPTR {
 		f.AddPTR = "1"
 	}
-	if rr == recordTypeTXT {
+	if set.key.rr == recordTypeTXT {
 		f.TXTData = target
 		f.AddPTR = "0"
 	} else {

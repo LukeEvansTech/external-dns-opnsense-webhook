@@ -52,7 +52,13 @@ type Config struct {
 	RetryMaxDelay      time.Duration `env:"OPNSENSE_RETRY_MAX_DELAY"             envDefault:"10s"`
 	RequestTimeout     time.Duration `env:"OPNSENSE_REQUEST_TIMEOUT"             envDefault:"20s"`
 	ReconfigureTimeout time.Duration `env:"OPNSENSE_RECONFIGURE_TIMEOUT"         envDefault:"45s"`
-	ApplyTimeout       time.Duration `env:"OPNSENSE_APPLY_TIMEOUT"               envDefault:"120s"`
+	// ApplyTimeout bounds the converge phases only. The trailing reconfigure
+	// runs on its own detached context, because a reload that has already
+	// started must not be abandoned half-way, so the worst case for one
+	// ApplyChanges is ApplyTimeout + ReconfigureTimeout. The HTTP server write
+	// timeout has to exceed that sum, or the webhook cuts off a reply for an
+	// apply that is still legitimately running.
+	ApplyTimeout time.Duration `env:"OPNSENSE_APPLY_TIMEOUT"               envDefault:"120s"`
 }
 
 // Validate checks the configuration and normalises Domains (lower-case, no

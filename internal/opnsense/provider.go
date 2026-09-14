@@ -2,6 +2,7 @@ package opnsense
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -25,6 +26,10 @@ type Provider struct {
 	// applyMu serialises ApplyChanges. external-dns is sequential, so
 	// contention only follows a client timeout; the late request waits.
 	applyMu sync.Mutex
+	// reconfigureMu serialises the reload itself, which applies and reads can
+	// both reach. Two concurrent reloads of the same saved table are wasted
+	// work on a firewall that restarts Unbound to honour them.
+	reconfigureMu sync.Mutex
 	// pending is set before the first write of an apply and cleared only by
 	// a successful reconfigure, so a failed reload is repaired even when the
 	// next plan is empty.
@@ -41,7 +46,11 @@ func NewProvider(cfg *Config) (*Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating opnsense client: %w", err)
 	}
-	return &Provider{cfg: cfg, client: c, filter: endpoint.NewDomainFilter(cfg.Domains)}, nil
+	p := &Provider{cfg: cfg, client: c, filter: endpoint.NewDomainFilter(cfg.Domains)}
+	// Publish the gauge at zero so the series exists before the first apply:
+	// an alert on it must be able to tell "not pending" from "never reported".
+	p.setPending(false)
+	return p, nil
 }
 
 // GetDomainFilter returns OPNSENSE_DOMAINS, negotiated back to external-dns
@@ -53,7 +62,7 @@ func (p *Provider) GetDomainFilter() endpoint.DomainFilterInterface { return p.f
 func (p *Provider) Records(ctx context.Context) (eps []*endpoint.Endpoint, err error) {
 	defer func() { metrics.Get().RecordOperation(err) }()
 	if p.pending.Load() {
-		if rerr := p.reconfigure(); rerr != nil {
+		if rerr := p.reconfigure(true); rerr != nil {
 			return nil, fmt.Errorf("applying pending reconfigure before read: %w", rerr)
 		}
 	}
@@ -76,13 +85,17 @@ func (p *Provider) Records(ctx context.Context) (eps []*endpoint.Endpoint, err e
 // ApplyChanges converges the table towards the plan (apply.go) under a
 // detached, bounded context and the single-writer lock.
 func (p *Provider) ApplyChanges(ctx context.Context, changes *plan.Changes) (err error) {
+	p.applyMu.Lock()
+	defer p.applyMu.Unlock()
+
+	// Timed from here rather than from entry: waiting for the single-writer
+	// lock is queueing, not apply work, and folding it in would make the
+	// histogram report a slow firewall whenever two requests overlapped.
 	start := time.Now()
 	defer func() {
 		metrics.Get().ApplyDuration.WithLabelValues(metrics.ProviderName).Observe(time.Since(start).Seconds())
 		metrics.Get().RecordOperation(err)
 	}()
-	p.applyMu.Lock()
-	defer p.applyMu.Unlock()
 
 	// Detached from the request: a client that hangs up mid-apply must not
 	// abandon the table half-converged, or leave saved and served apart.
@@ -98,16 +111,7 @@ func (p *Provider) AdjustEndpoints(in []*endpoint.Endpoint) ([]*endpoint.Endpoin
 	out := make([]*endpoint.Endpoint, 0, len(in))
 	for _, e := range in {
 		name := normaliseName(e.DNSName)
-		reason := ""
-		switch {
-		case e.RecordType != recordTypeA && e.RecordType != recordTypeAAAA && e.RecordType != recordTypeTXT:
-			reason = "type"
-		case isWildcard(name):
-			reason = "wildcard"
-		case !inDomains(name, p.cfg.Domains):
-			reason = "domain"
-		}
-		if reason != "" {
+		if reason := p.dropReason(e, name); reason != "" {
 			m.EndpointsDroppedTotal.WithLabelValues(metrics.ProviderName, reason).Inc()
 			slog.Warn("dropping endpoint the provider cannot write", "name", e.DNSName, "type", e.RecordType, "reason", reason)
 			continue
@@ -120,9 +124,58 @@ func (p *Provider) AdjustEndpoints(in []*endpoint.Endpoint) ([]*endpoint.Endpoin
 	return out, nil
 }
 
+// dropReason names why an endpoint cannot be written, or "" when it can. The
+// set of reasons is closed — type, wildcard, set-identifier, apex, domain,
+// name, txt — because it is a metric label, and it mirrors what the write path
+// rejects: an endpoint external-dns is allowed to keep desiring but the
+// provider can never create is a plan that never converges, and external-dns
+// would retry it every pass forever.
+func (p *Provider) dropReason(e *endpoint.Endpoint, name string) string {
+	switch {
+	case e.RecordType != recordTypeA && e.RecordType != recordTypeAAAA && e.RecordType != recordTypeTXT:
+		return "type"
+	case e.SetIdentifier != "":
+		// Host overrides have no way to hold two record sets of the same name
+		// and type apart, so a weighted or latency policy cannot be expressed.
+		return "set-identifier"
+	case isWildcard(name):
+		return "wildcard"
+	}
+	if _, _, err := splitName(name, p.cfg.Domains); err != nil {
+		switch {
+		case errors.Is(err, ErrApexName):
+			return "apex"
+		case errors.Is(err, ErrNameOutsideDomains):
+			return "domain"
+		default:
+			return "name"
+		}
+	}
+	if e.RecordType == recordTypeTXT {
+		for _, t := range e.Targets {
+			if _, err := validateTXT(t); err != nil {
+				metrics.Get().TXTInvalidTotal.WithLabelValues(metrics.ProviderName).Inc()
+				return "txt"
+			}
+		}
+	}
+	return ""
+}
+
 // reconfigure runs under its own bounded context, detached from any request,
 // because a cancelled request must not leave saved and served state apart.
-func (p *Provider) reconfigure() error {
+//
+// repair marks a call made only because an earlier reconfigure failed. Several
+// reads can notice the same pending flag at once; whichever reaches the lock
+// first does the work, and the rest find the flag already cleared and return
+// without reloading the firewall again. An apply's own trailing reconfigure is
+// never a repair: it has just written, so it must always reload.
+func (p *Provider) reconfigure(repair bool) error {
+	p.reconfigureMu.Lock()
+	defer p.reconfigureMu.Unlock()
+	if repair && !p.pending.Load() {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), p.cfg.ReconfigureTimeout)
 	defer cancel()
 	err := p.client.Reconfigure(ctx)

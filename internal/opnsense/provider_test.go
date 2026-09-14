@@ -14,12 +14,17 @@ import (
 func TestProvider_AdjustEndpoints(t *testing.T) {
 	f := fake.New(t)
 	p := testProvider(t, f)
+	weighted := ep("weighted.example.com", "A", 0, "192.0.2.1")
+	weighted.SetIdentifier = "eu-west"
 	in := []*endpoint.Endpoint{
 		ep("App.Example.com.", "A", 1<<40, "192.0.2.1"),
 		ep("alias.example.com", "CNAME", 0, "app.example.com"),
 		ep("mail.example.com", "MX", 0, "10 mx.example.com"),
 		ep("*.example.com", "A", 0, "192.0.2.1"),
 		ep("other.org", "A", 0, "192.0.2.1"),
+		ep("example.com", "A", 0, "192.0.2.1"),
+		weighted,
+		ep("bad.example.com", "TXT", 0, `"has\"quote"`),
 		ep("t.example.com", "TXT", 0, `"ok"`),
 	}
 	out, err := p.AdjustEndpoints(in)
@@ -39,6 +44,48 @@ func TestProvider_AdjustEndpoints(t *testing.T) {
 	// lower-casing is AdjustEndpoints' own and must land on a copy.
 	if in[0].DNSName != "App.Example.com" {
 		t.Errorf("AdjustEndpoints mutated its input: %q", in[0].DNSName)
+	}
+}
+
+// TestProvider_AdjustEndpointsReasons pins the closed set of drop reasons: a
+// reason is a metric label, and an endpoint AdjustEndpoints keeps but the
+// write path rejects is a plan external-dns retries forever.
+func TestProvider_AdjustEndpointsReasons(t *testing.T) {
+	f := fake.New(t)
+	p := testProvider(t, f)
+	weighted := ep("weighted.example.com", "A", 0, "192.0.2.1")
+	weighted.SetIdentifier = "eu-west"
+	cases := []struct {
+		reason string
+		e      *endpoint.Endpoint
+	}{
+		{"type", ep("alias.example.com", "CNAME", 0, "app.example.com")},
+		{"set-identifier", weighted},
+		{"wildcard", ep("*.example.com", "A", 0, "192.0.2.1")},
+		{"apex", ep("example.com", "A", 0, "192.0.2.1")},
+		{"domain", ep("host.other.org", "A", 0, "192.0.2.1")},
+		{"txt", ep("bad.example.com", "TXT", 0, `"has\"quote"`)},
+		{"", ep("good.example.com", "A", 0, "192.0.2.1")},
+		{"", ep("good.example.com", "TXT", 0, `"ok"`)},
+	}
+	for _, tc := range cases {
+		name := tc.reason
+		if name == "" {
+			name = "kept/" + tc.e.RecordType
+		}
+		t.Run(name, func(t *testing.T) {
+			got := p.dropReason(tc.e, normaliseName(tc.e.DNSName))
+			if got != tc.reason {
+				t.Errorf("dropReason = %q, want %q", got, tc.reason)
+			}
+			out, err := p.AdjustEndpoints([]*endpoint.Endpoint{tc.e})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := map[bool]int{true: 0, false: 1}[tc.reason != ""]; len(out) != want {
+				t.Errorf("kept %d endpoints, want %d", len(out), want)
+			}
+		})
 	}
 }
 
@@ -114,5 +161,31 @@ func TestProvider_RecordsMapsSnapshot(t *testing.T) {
 	}
 	if eps[2].DNSName != "www.example.com" || eps[2].RecordType != recordTypeA {
 		t.Errorf("alias endpoint = %+v", eps[2])
+	}
+}
+
+// TestProvider_ReconfigureSerialised covers invariant I5: several reads can
+// notice the same pending flag, but only one of them reloads the firewall.
+func TestProvider_ReconfigureSerialised(t *testing.T) {
+	f := fake.New(t)
+	p := testProvider(t, f)
+	p.setPending(true)
+
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := p.Records(context.Background()); err != nil {
+				t.Errorf("Records: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if f.Reconfigures() != 1 {
+		t.Errorf("reconfigures = %d, want exactly 1", f.Reconfigures())
+	}
+	if p.pending.Load() {
+		t.Error("pending still set after a successful repair")
 	}
 }
