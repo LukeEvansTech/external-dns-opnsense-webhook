@@ -108,10 +108,10 @@ func TestCachedProbe_DetachesFromCallerContext(t *testing.T) {
 }
 
 func TestReadyzHandler_ReturnsServiceUnavailableWhenProbeFails(t *testing.T) {
-	// The cause embeds internal topology (UniFi host / console ID / upstream
+	// The cause embeds internal topology (firewall host / API path / upstream
 	// error body), so the response body to the unauthenticated caller must be
 	// generic and must NOT leak it. See #225.
-	const secret = "https://unifi.internal.example:8443 console-abc123 boom"
+	const secret = "https://fw.internal.example:8443 api-key-abc123 boom"
 	handler := readyzHandler(func(_ context.Context) error { return errors.New(secret) }, time.Minute)
 
 	rec := httptest.NewRecorder()
@@ -124,7 +124,7 @@ func TestReadyzHandler_ReturnsServiceUnavailableWhenProbeFails(t *testing.T) {
 	if strings.TrimSpace(body) != "not ready" {
 		t.Errorf("body = %q, want generic %q", body, "not ready")
 	}
-	if strings.Contains(body, secret) || strings.Contains(body, "unifi.internal") || strings.Contains(body, "console-abc123") {
+	if strings.Contains(body, secret) || strings.Contains(body, "fw.internal") || strings.Contains(body, "api-key-abc123") {
 		t.Errorf("body leaked the probe error detail: %q", body)
 	}
 }

@@ -194,6 +194,12 @@ func TestApplyChanges_ProviderError(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", rec.Code)
 	}
+	// The body carries the provider's own message: external-dns logs the
+	// response, and a bare 500 tells an operator nothing about which phase
+	// of the apply failed.
+	if !strings.Contains(rec.Body.String(), "boom") {
+		t.Errorf("body = %q, want the provider error text", rec.Body.String())
+	}
 }
 
 func TestAdjustEndpoints_HappyPath(t *testing.T) {

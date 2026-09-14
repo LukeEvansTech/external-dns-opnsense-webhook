@@ -31,9 +31,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	provider, err := dnsprovider.Init(&cfg)
+	prov, err := dnsprovider.Init(&cfg)
 	if err != nil {
 		slog.Error("initializing provider", "error", err)
+		os.Exit(1)
+	}
+
+	// The two configurations live in different packages, so this is the only
+	// place both timeouts are visible: refuse to start rather than let the
+	// server cut off the reply to an apply that is still legitimately running.
+	if budget := prov.ApplyBudget(); budget > cfg.ServerWriteTimeout {
+		slog.Error("SERVER_WRITE_TIMEOUT must exceed OPNSENSE_APPLY_TIMEOUT plus OPNSENSE_RECONFIGURE_TIMEOUT",
+			"server_write_timeout", cfg.ServerWriteTimeout, "apply_budget", budget)
 		os.Exit(1)
 	}
 
@@ -43,16 +52,12 @@ func main() {
 	)
 	defer stop()
 
-	// /readyz delegates to provider.Records — failures mean the upstream
-	// UniFi controller is unreachable or credentials are invalid, both of
-	// which should keep the pod out of rotation.
-	probe := func(ctx context.Context) error {
-		_, err := provider.Records(ctx)
+	// Listeners must be up before the firewall is contacted: external-dns
+	// gives GET / only a few retries at start. Startup runs concurrently and
+	// only affects readiness.
+	go prov.Startup(ctx)
 
-		return err
-	}
-
-	if err := server.Run(ctx, &cfg, webhook.New(provider), probe); err != nil {
+	if err := server.Run(ctx, &cfg, webhook.New(prov), prov.Ready); err != nil {
 		slog.Error("running server", "error", err)
 		os.Exit(1)
 	}

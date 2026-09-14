@@ -1,3 +1,4 @@
+// Package dnsprovider constructs the OPNsense provider from the environment.
 package dnsprovider
 
 import (
@@ -5,25 +6,20 @@ import (
 	"log/slog"
 
 	"github.com/LukeEvansTech/external-dns-opnsense-webhook/internal/config"
-	"github.com/LukeEvansTech/external-dns-opnsense-webhook/internal/unifi"
+	"github.com/LukeEvansTech/external-dns-opnsense-webhook/internal/opnsense"
 	"github.com/caarlos0/env/v11"
-	"sigs.k8s.io/external-dns/provider"
 )
 
-//nolint:ireturn // Must return provider.Provider interface per external-dns contract
-func Init(_ *config.Config) (provider.Provider, error) {
-	unifiConfig := unifi.Config{}
-	if err := env.Parse(&unifiConfig); err != nil {
-		return nil, fmt.Errorf("reading unifi configuration: %w", err)
+// Init parses OPNSENSE_* and builds the provider. It performs no I/O.
+func Init(_ *config.Config) (*opnsense.Provider, error) {
+	cfg := opnsense.Config{}
+	if err := env.Parse(&cfg); err != nil {
+		return nil, fmt.Errorf("reading opnsense configuration: %w", err)
 	}
-
-	slog.Info("creating unifi provider",
-		"host", unifiConfig.Host, "site", unifiConfig.Site)
-
-	p, err := unifi.NewUnifiProvider(&unifiConfig)
+	p, err := opnsense.NewProvider(&cfg)
 	if err != nil {
-		return nil, fmt.Errorf("creating UniFi provider: %w", err)
+		return nil, fmt.Errorf("creating opnsense provider: %w", err)
 	}
-
+	slog.Info("created opnsense provider", "host", cfg.Host, "domains", cfg.Domains, "add_ptr", cfg.AddPTR)
 	return p, nil
 }

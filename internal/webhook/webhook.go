@@ -75,8 +75,11 @@ func (p *Webhook) ApplyChanges(w http.ResponseWriter, r *http.Request) {
 
 	if err := p.provider.ApplyChanges(r.Context(), &changes); err != nil {
 		requestLog(r).Error("applying changes", "error", err)
-		w.Header().Set(contentTypeHeader, contentTypePlaintext)
-		w.WriteHeader(http.StatusInternalServerError)
+		// The provider joins every phase failure into one message. Writing it
+		// as the body puts the cause in external-dns's own log, which is where
+		// an operator looks first; unlike /readyz this endpoint is reached only
+		// by the controller, so there is no unauthenticated caller to leak to.
+		writePlainError(w, r, http.StatusInternalServerError, err.Error())
 
 		return
 	}

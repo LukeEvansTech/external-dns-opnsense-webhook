@@ -196,3 +196,69 @@ func (p *Provider) setPending(v bool) {
 	}
 	metrics.Get().PendingReconfigure.WithLabelValues(metrics.ProviderName).Set(g)
 }
+
+// Startup probes the firewall and repairs saved-but-unserved managed rows.
+// It is called in the background after the listeners are bound: external-dns
+// negotiates GET / with only a few retries, so the webhook must answer before
+// the firewall does. Failures are logged and leave /readyz failing; they
+// never exit the process.
+func (p *Provider) Startup(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, p.cfg.ApplyTimeout)
+	defer cancel()
+	if err := p.client.ServiceStatus(ctx); err != nil {
+		slog.Error("opnsense unreachable at startup; readiness will report the cause", "error", err)
+		return
+	}
+	if err := p.servedStateCheck(ctx); err != nil {
+		slog.Error("served-state check failed", "error", err)
+	}
+}
+
+// servedStateCheck compares managed rows in the saved configuration with
+// what Unbound serves and reconfigures once if any is missing. The owner
+// marker is a heuristic for this check only.
+func (p *Provider) servedStateCheck(ctx context.Context) error {
+	snap, err := p.client.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	served, err := p.client.ListLocalData(ctx)
+	if err != nil {
+		return err
+	}
+	have := map[rowKey]struct{}{}
+	for _, d := range served {
+		have[rowKey{name: normaliseName(d.Name), rr: d.RRType}] = struct{}{}
+	}
+	missing := 0
+	for _, r := range snap.rows { // rows is []*hostRow (pointer-stable since Task 8)
+		if !r.enabled() || bool(r.IsAlias) || r.Description != p.cfg.OwnerMarker {
+			continue
+		}
+		if _, ok := have[rowKey{name: joinName(r.Hostname, r.Domain), rr: r.RR}]; !ok {
+			missing++
+			slog.Warn("managed override saved but not served", "name", joinName(r.Hostname, r.Domain), "type", r.RR, "uuid", r.UUID)
+		}
+	}
+	if missing == 0 {
+		return nil
+	}
+	slog.Info("reconfiguring Unbound to publish unserved managed rows", "missing", missing)
+	p.setPending(true)
+	// Not a repair: the pending flag was set a line ago solely to make this
+	// reload self-healing if it fails, so it must always reload.
+	return p.reconfigure(false)
+}
+
+// Ready is the readiness probe: one cheap page read. It reports not-ready
+// while the API is unreachable or the credentials are wrong.
+func (p *Provider) Ready(ctx context.Context) error {
+	_, err := p.client.SearchHostOverrides(ctx, 1, 1)
+	return err
+}
+
+// ApplyBudget is the worst-case wall time of one ApplyChanges: the apply
+// timeout plus the trailing reconfigure, which runs on its own context.
+func (p *Provider) ApplyBudget() time.Duration {
+	return p.cfg.ApplyTimeout + p.cfg.ReconfigureTimeout
+}
