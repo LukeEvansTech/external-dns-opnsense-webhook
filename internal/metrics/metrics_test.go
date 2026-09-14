@@ -148,7 +148,55 @@ func TestBuild_RegistersOPNsenseMetrics(t *testing.T) {
 			t.Errorf("metric %s not registered", want)
 		}
 	}
+
+	counterValue := func(c prometheus.Counter) float64 {
+		t.Helper()
+		var dm dto.Metric
+		if err := c.Write(&dm); err != nil {
+			t.Fatalf("counter.Write: %v", err)
+		}
+
+		return dm.GetCounter().GetValue()
+	}
+	if got := gaugeValue(t, m.RowsTotal.WithLabelValues(ProviderName)); got != 261 {
+		t.Errorf("RowsTotal = %v, want 261", got)
+	}
+	if got := gaugeValue(t, m.PendingReconfigure.WithLabelValues(ProviderName)); got != 1 {
+		t.Errorf("PendingReconfigure = %v, want 1", got)
+	}
+	if got := counterValue(m.EndpointsDroppedTotal.WithLabelValues(ProviderName, "wildcard")); got != 1 {
+		t.Errorf("EndpointsDroppedTotal{wildcard} = %v, want 1", got)
+	}
+	if got := counterValue(m.DeleteBlockedTotal.WithLabelValues(ProviderName)); got != 1 {
+		t.Errorf("DeleteBlockedTotal = %v, want 1", got)
+	}
+	if got := counterValue(m.TXTInvalidTotal.WithLabelValues(ProviderName)); got != 1 {
+		t.Errorf("TXTInvalidTotal = %v, want 1", got)
+	}
+
 	if ProviderName != "opnsense" {
 		t.Errorf("ProviderName = %q, want opnsense", ProviderName)
+	}
+}
+
+func TestRecordReconfigure_LabelsOkAndError(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := build(promauto.With(reg), "test")
+	counterValue := func(result string) float64 {
+		t.Helper()
+		var dm dto.Metric
+		if err := m.ReconfigureTotal.WithLabelValues(ProviderName, result).Write(&dm); err != nil {
+			t.Fatalf("counter.Write: %v", err)
+		}
+		return dm.GetCounter().GetValue()
+	}
+	m.RecordReconfigure(nil)
+	m.RecordReconfigure(nil)
+	m.RecordReconfigure(errors.New("boom"))
+	if got := counterValue("ok"); got != 2 {
+		t.Errorf("reconfigure_total{result=ok} = %v, want 2", got)
+	}
+	if got := counterValue("error"); got != 1 {
+		t.Errorf("reconfigure_total{result=error} = %v, want 1", got)
 	}
 }

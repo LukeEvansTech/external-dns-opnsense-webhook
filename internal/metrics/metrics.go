@@ -252,49 +252,76 @@ func build(f promauto.Factory, version string) *Metrics {
 		),
 
 		PagesFetchedTotal: f.NewCounterVec(
-			prometheus.CounterOpts{Namespace: namespace, Name: "opnsense_pages_fetched_total",
-				Help: "Total number of searchHostOverride pages fetched"},
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "opnsense_pages_fetched_total",
+				Help:      "Total number of searchHostOverride pages fetched",
+			},
 			[]string{labelProvider},
 		),
 		ReadRestartsTotal: f.NewCounterVec(
-			prometheus.CounterOpts{Namespace: namespace, Name: "opnsense_read_restarts_total",
-				Help: "Total number of paginated reads restarted because the table changed mid-read"},
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "opnsense_read_restarts_total",
+				Help:      "Total number of paginated reads restarted because the table changed mid-read",
+			},
 			[]string{labelProvider},
 		),
 		RowsTotal: f.NewGaugeVec(
-			prometheus.GaugeOpts{Namespace: namespace, Name: "opnsense_rows",
-				Help: "Host override rows in the last accepted snapshot (all rows, before filtering)"},
+			prometheus.GaugeOpts{
+				Namespace: namespace,
+				Name:      "opnsense_rows",
+				Help:      "Host override rows in the last accepted snapshot (all rows, before filtering)",
+			},
 			[]string{labelProvider},
 		),
 		ReconfigureTotal: f.NewCounterVec(
-			prometheus.CounterOpts{Namespace: namespace, Name: "opnsense_reconfigure_total",
-				Help: "Total number of Unbound reconfigure calls by result"},
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "opnsense_reconfigure_total",
+				Help:      "Total number of Unbound reconfigure calls by result",
+			},
 			[]string{labelProvider, "result"},
 		),
 		PendingReconfigure: f.NewGaugeVec(
-			prometheus.GaugeOpts{Namespace: namespace, Name: "opnsense_pending_reconfigure",
-				Help: "1 while saved configuration has not been applied to the running Unbound"},
+			prometheus.GaugeOpts{
+				Namespace: namespace,
+				Name:      "opnsense_pending_reconfigure",
+				Help:      "1 while saved configuration has not been applied to the running Unbound",
+			},
 			[]string{labelProvider},
 		),
 		ApplyDuration: f.NewHistogramVec(
-			prometheus.HistogramOpts{Namespace: namespace, Name: "opnsense_apply_duration_seconds",
-				Help:    "Wall time of one ApplyChanges including reconfigure",
-				Buckets: prometheus.ExponentialBuckets(0.5, 2, 9)},
+			prometheus.HistogramOpts{
+				Namespace: namespace,
+				Name:      "opnsense_apply_duration_seconds",
+				Help:      "Wall time of one ApplyChanges including reconfigure",
+				Buckets:   prometheus.ExponentialBuckets(0.5, 2, 9),
+			},
 			[]string{labelProvider},
 		),
 		DeleteBlockedTotal: f.NewCounterVec(
-			prometheus.CounterOpts{Namespace: namespace, Name: "opnsense_delete_blocked_total",
-				Help: "Deletes refused because the row has alias children"},
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "opnsense_delete_blocked_total",
+				Help:      "Deletes refused because the row has alias children",
+			},
 			[]string{labelProvider},
 		),
 		EndpointsDroppedTotal: f.NewCounterVec(
-			prometheus.CounterOpts{Namespace: namespace, Name: "opnsense_endpoints_dropped_total",
-				Help: "Desired endpoints dropped in AdjustEndpoints by reason"},
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "opnsense_endpoints_dropped_total",
+				Help:      "Desired endpoints dropped in AdjustEndpoints by reason",
+			},
 			[]string{labelProvider, "reason"},
 		),
 		TXTInvalidTotal: f.NewCounterVec(
-			prometheus.CounterOpts{Namespace: namespace, Name: "opnsense_txt_invalid_total",
-				Help: "TXT endpoints refused for length or content"},
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "opnsense_txt_invalid_total",
+				Help:      "TXT endpoints refused for length or content",
+			},
 			[]string{labelProvider},
 		),
 
