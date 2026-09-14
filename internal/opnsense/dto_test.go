@@ -17,17 +17,28 @@ func TestDTO_DecodeSearchPage(t *testing.T) {
 	if err := json.Unmarshal(raw, &page); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if page.Total != 3 || page.RowCount != 3 || page.Current != 1 || len(page.Rows) != 3 {
+	// The fixture is a sanitised capture from a real firewall: one page of
+	// three rows out of a 261-row table, so it covers the paging envelope
+	// (total far larger than len(rows)) as well as the row shape. The capture
+	// carries two fields the DTO does not model — "%rr", the option field's
+	// display text, and "aliases" — which must decode away without error.
+	if page.Total != 261 || page.RowCount != 3 || page.Current != 1 || len(page.Rows) != 3 {
 		t.Fatalf("page = %+v", page)
 	}
 	app := page.Rows[0]
 	if bool(app.IsAlias) || app.Enabled != "1" || app.RR != "A" || app.Server != "192.0.2.10" {
 		t.Errorf("row0 = %+v", app)
 	}
-	if len(app.Children) != 1 || !bool(app.Children[0].IsAlias) || app.Children[0].Hostname != "www" || app.Children[0].Domain != "" {
+	if app.Hostname != "app" || app.Domain != "example.com" || app.AddPTR != "1" || app.TTL != "" {
+		t.Errorf("row0 fields = %+v", app)
+	}
+	// Nothing on the captured firewall carries an alias, so the tree view
+	// omits _children altogether; the alias shape is covered by the
+	// fake-backed snapshot and apply tests instead.
+	if len(app.Children) != 0 {
 		t.Errorf("children = %+v", app.Children)
 	}
-	if page.Rows[2].Enabled != "0" || page.Rows[2].TTL != "300" {
+	if page.Rows[2].Hostname != "printer" || page.Rows[2].Description != "" {
 		t.Errorf("row2 = %+v", page.Rows[2])
 	}
 }
