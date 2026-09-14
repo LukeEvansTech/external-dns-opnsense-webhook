@@ -13,17 +13,11 @@ import (
 // Record types the provider reads or writes. CNAME is read-only knowledge:
 // OPNsense has no CNAME record; aliases are rendered as copies of their parent.
 const (
-	//nolint:unused // consumed by names.go/transport.go in later tasks
-	recordTypeA = "A"
-	//nolint:unused // consumed by names.go/transport.go in later tasks
+	recordTypeA    = "A"
 	recordTypeAAAA = "AAAA"
-	// recordTypeTXT and recordTypeMX are referenced by hostRow.target
-	// (dto.go), which is itself unused until client.go wires it in.
-	//
-	//nolint:unused // consumed via hostRow.target (dto.go) once client.go calls it
+	// recordTypeTXT and recordTypeMX are referenced by hostRow.target (dto.go).
 	recordTypeTXT = "TXT"
-	//nolint:unused // consumed via hostRow.target (dto.go) once client.go calls it
-	recordTypeMX = "MX"
+	recordTypeMX  = "MX"
 )
 
 // Bounds on operator-tunable knobs.

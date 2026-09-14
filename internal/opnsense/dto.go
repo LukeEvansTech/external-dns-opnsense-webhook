@@ -7,11 +7,6 @@ import (
 	"strings"
 )
 
-// opAddHostOverride names the addHostOverride operation for error reporting.
-// Defined here temporarily; Task 7 moves it into client.go alongside the
-// other operation names.
-const opAddHostOverride = "add_host_override"
-
 // flexBool decodes the JSON true/false and "0"/"1"/bare-number spellings
 // OPNsense's model layer produces for a boolean field. In this package it
 // decodes isAlias only; enabled and addptr stay raw strings on hostRow, with
@@ -112,8 +107,6 @@ type searchPage struct {
 // searchRequest is the searchHostOverride POST body. sort is a map of field
 // to direction; OPNsense uses every key as a sort field and the first key's
 // direction, then appends the row uuid as a tie-breaker.
-//
-//nolint:unused // consumed by client.go in a later task
 type searchRequest struct {
 	Current      int               `json:"current"`
 	RowCount     int               `json:"rowCount"`
@@ -122,8 +115,6 @@ type searchRequest struct {
 }
 
 // hostFields is the body of addHostOverride and setHostOverride.
-//
-//nolint:unused // consumed by client.go in a later task
 type hostFields struct {
 	Enabled     string `json:"enabled"`
 	Hostname    string `json:"hostname"`
@@ -136,12 +127,10 @@ type hostFields struct {
 	Description string `json:"description"`
 }
 
-//nolint:unused // consumed by client.go in a later task
 type hostPayload struct {
 	Host hostFields `json:"host"`
 }
 
-//nolint:unused // consumed by client.go in a later task
 type getHostResponse struct {
 	Host hostRow `json:"host"`
 }
@@ -166,14 +155,13 @@ func (w writeResponse) err(operation string) error {
 	}
 }
 
-//nolint:unused // consumed by client.go in a later task
 type statusResponse struct {
 	Status string `json:"status"`
 }
 
 // localData is one entry of diagnostics/listlocaldata.
 //
-//nolint:tagliatelle,unused // OPNsense field names cannot be changed; consumed by client.go in a later task
+//nolint:tagliatelle // OPNsense field names cannot be changed
 type localData struct {
 	Name   string `json:"name"`
 	TTL    string `json:"ttl"`
@@ -182,7 +170,6 @@ type localData struct {
 	Value  string `json:"value"`
 }
 
-//nolint:unused // consumed by client.go in a later task
 type localDataResponse struct {
 	Status string      `json:"status"`
 	Data   []localData `json:"data"`
