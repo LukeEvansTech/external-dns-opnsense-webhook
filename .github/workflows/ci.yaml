@@ -43,6 +43,7 @@ jobs:
         run: mise run test
       - name: Protocol e2e
         run: mise run test-e2e
+      # Fails until test/reconcile exists (plan Task 11); the first push happens after it lands.
       - name: Reconcile suite
         run: mise run test-reconcile
 
