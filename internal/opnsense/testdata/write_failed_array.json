@@ -1,0 +1,7 @@
+{
+  "result": "failed",
+  "validations": {
+    "host.txtdata": ["The field TXT data is required.", "Text may not exceed 255 characters."],
+    "host.domain": "A valid domain must be specified."
+  }
+}

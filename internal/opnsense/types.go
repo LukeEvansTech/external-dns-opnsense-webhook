@@ -12,13 +12,18 @@ import (
 
 // Record types the provider reads or writes. CNAME is read-only knowledge:
 // OPNsense has no CNAME record; aliases are rendered as copies of their parent.
-//
-//nolint:unused // consumed by dto.go/names.go/transport.go in later tasks
 const (
-	recordTypeA    = "A"
+	//nolint:unused // consumed by names.go/transport.go in later tasks
+	recordTypeA = "A"
+	//nolint:unused // consumed by names.go/transport.go in later tasks
 	recordTypeAAAA = "AAAA"
-	recordTypeTXT  = "TXT"
-	recordTypeMX   = "MX"
+	// recordTypeTXT and recordTypeMX are referenced by hostRow.target
+	// (dto.go), which is itself unused until client.go wires it in.
+	//
+	//nolint:unused // consumed via hostRow.target (dto.go) once client.go calls it
+	recordTypeTXT = "TXT"
+	//nolint:unused // consumed via hostRow.target (dto.go) once client.go calls it
+	recordTypeMX = "MX"
 )
 
 // Bounds on operator-tunable knobs.
@@ -30,12 +35,10 @@ const (
 	// maxTXTBytes is both the model's txtdata limit (DescriptionField, 255)
 	// and RFC 1035's character-string limit; they coincide because the
 	// provider only accepts ASCII.
-	//
-	//nolint:unused // consumed by dto.go/names.go in later tasks
 	maxTXTBytes = 255
 	// maxTTL is the Unbound model's IntegerField ceiling for ttl.
 	//
-	//nolint:unused // consumed by dto.go/names.go in later tasks
+	//nolint:unused // consumed by names.go in a later task
 	maxTTL = 2147483647
 )
 

@@ -92,8 +92,3 @@ func IsNetworkError(err error) bool {
 	_, ok := errors.AsType[*NetworkError](err)
 	return ok
 }
-
-// StringOrList is a placeholder for the JSON shape OPNsense's model
-// validation returns (a single string or a list of strings per field).
-// Task 4's dto.go replaces this with the real unmarshalling type.
-type StringOrList []string
