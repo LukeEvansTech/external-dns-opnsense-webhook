@@ -18,13 +18,13 @@ verbatim because the code is derived from external-dns-unifi-webhook.
 
 - **Idiomatic.** Follow [Effective Go](https://go.dev/doc/effective_go) and
   the [Code Review Comments](https://go.dev/wiki/CodeReviewComments) wiki.
-  `gofmt -s` runs on every staged `.go` file via lefthook and again in CI:
-  never hand-format, and don't fight it with inline exceptions. Comments
-  explain non-obvious constraints only (a hidden invariant, why a workaround
-  exists, what would surprise a reader); don't narrate what good naming
-  already says, and don't reference the current change or past behavior in
-  a comment: that belongs in the PR description and rots as the code moves
-  on.
+  `gofmt` and `goimports` run as golangci-lint's formatters, via `mise run
+  lint` and again in CI: never hand-format, and don't fight it with inline
+  exceptions. Comments explain non-obvious constraints only (a hidden
+  invariant, why a workaround exists, what would surprise a reader); don't
+  narrate what good naming already says, and don't reference the current
+  change or past behavior in a comment: that belongs in the PR description
+  and rots as the code moves on.
 - **Go version.** The language version is whatever `go.mod`'s `go`
   directive says; read it from there rather than assuming or hard-coding
   one. The directive is pinned to the lowest patch release of its minor
@@ -39,9 +39,9 @@ verbatim because the code is derived from external-dns-unifi-webhook.
   code). `go fix` (rebuilt in 1.26 as a modernizer runner on `go vet`'s
   analysis) surfaces these mechanical migrations; run it after a
   toolchain bump.
-- **Idempotent.** Reconcilers, code generators (`mise run generate`), and
-  CLI subcommands must be safe to re-run: identical input yields identical
-  output/state, with no accumulating side effects on a second invocation.
+- **Idempotent.** Reconcilers, code generators, and CLI subcommands must be
+  safe to re-run: identical input yields identical output/state, with no
+  accumulating side effects on a second invocation.
   The strongest version of this is a stateless service: if every response
   is re-derivable from its inputs or upstream, a restart or an extra
   replica can't affect correctness, only latency.
@@ -138,13 +138,15 @@ location, `-ldflags` version stamping all vary) without checking
 like `generate`/`generate-check`, `test-integration`, `test-e2e`, `bench`,
 or `helm-*` for repos that ship a chart; not every repo has every task.
 
-`lefthook` (`.lefthook.toml`, extending the shared `home-operations/.github`
-config) runs `gofmt -s -w` on staged `.go` files pre-commit; that part is
-shared fleet-wide. What CI actually enforces beyond that (`go vet`, a `go
-mod tidy` diff check, a generated-file diff check) varies per repo: check
-`.golangci.yml` and `.github/workflows/` here rather than assuming every
-repo enforces the same set. Lint rules themselves live in `.golangci.yml`;
-read it instead of trusting a restated list, since the two can drift.
+This repository enforces its gates directly rather than via a pre-commit
+hook: `.golangci.yml` pins the `gofmt`/`goimports` formatters plus the
+enabled linter list, and is what both `mise run lint` and super-linter's
+Go check read, so treat it as the single source of truth rather than
+trusting a restated summary. `.github/workflows/ci.yaml` runs a `go mod
+tidy` tidiness check, the unit, protocol-e2e and reconcile test suites,
+`golangci-lint`, `govulncheck`, and `actionlint`/`zizmor` against the
+workflows themselves. `.github/workflows/lint.yml` separately calls the
+shared super-linter workflow.
 
 ## Containers
 
