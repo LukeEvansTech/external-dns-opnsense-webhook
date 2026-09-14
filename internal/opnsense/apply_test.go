@@ -250,3 +250,97 @@ func TestApply_FailedConvergeKeepsExistingRows(t *testing.T) {
 		t.Errorf("rows = %+v; the name lost its only data row after a failed write", a)
 	}
 }
+
+// TestApply_TXTCreateFailureBlocksDataCreate holds the protective half of
+// invariant I1: if the registry TXT could not be written, the data rows it
+// would have claimed are not created either, or they would be left with
+// nothing recording who owns them.
+func TestApply_TXTCreateFailureBlocksDataCreate(t *testing.T) {
+	f := fake.New(t)
+	p := testProvider(t, f)
+	changes := &plan.Changes{Create: []*endpoint.Endpoint{
+		ep("app.example.com", "A", 0, "192.0.2.1"),
+		ep("k8s.main.a-app.example.com", "TXT", 0, label),
+	}}
+	// No SkipCalls: the fault lands on the TXT add, which is the first one.
+	f.Inject(fake.Fault{Op: fake.OpAddHostOverride, Status: 500, Times: 1})
+	err := p.ApplyChanges(context.Background(), changes)
+	a, txt := rowsByKind(f)
+	if err == nil || len(txt) != 0 || len(a) != 0 {
+		t.Fatalf("err=%v A=%d TXT=%d; want neither row written", err, len(a), len(txt))
+	}
+	if f.Hits(fake.OpAddHostOverride) != 1 {
+		t.Errorf("add calls = %d, want 1: the data phase must not have run", f.Hits(fake.OpAddHostOverride))
+	}
+	// The attempt itself is what forces the reload: an add whose response was
+	// lost may still have committed, so pending is set before the call and a
+	// reconfigure has to follow whether or not the call came back.
+	if f.Reconfigures() != 1 {
+		t.Errorf("reconfigures = %d, want 1 after an attempted write", f.Reconfigures())
+	}
+	if err := p.ApplyChanges(context.Background(), changes); err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	if a, txt := rowsByKind(f); len(a) != 1 || len(txt) != 1 {
+		t.Errorf("after second apply: A=%d TXT=%d; want both converged", len(a), len(txt))
+	}
+}
+
+// TestApply_DataDeleteFailureKeepsTXT is the mirror: if a data row could not
+// be removed, its registry TXT stays too, so the row is never left orphaned.
+func TestApply_DataDeleteFailureKeepsTXT(t *testing.T) {
+	f := fake.New(t)
+	f.AddRow(fake.Row{Hostname: "app", Domain: "example.com", RR: "A", Server: "192.0.2.1", Description: "external-dns"})
+	f.AddRow(fake.Row{Hostname: "k8s.main.a-app", Domain: "example.com", RR: "TXT", TXTData: stripTXTQuotes(label), Description: "external-dns"})
+	p := testProvider(t, f)
+	// Deletes are idempotent and therefore retried; one attempt keeps the
+	// fault pointed at the single call the test is about.
+	p.cfg.RetryAttempts = 1
+	changes := &plan.Changes{Delete: []*endpoint.Endpoint{
+		ep("k8s.main.a-app.example.com", "TXT", 0, label),
+		ep("app.example.com", "A", 0, "192.0.2.1"),
+	}}
+	// No SkipCalls: the fault lands on the A delete, which is the first one.
+	f.Inject(fake.Fault{Op: fake.OpDel, Status: 500, Times: 1})
+	err := p.ApplyChanges(context.Background(), changes)
+	a, txt := rowsByKind(f)
+	if err == nil || len(a) != 1 || len(txt) != 1 {
+		t.Fatalf("err=%v A=%d TXT=%d; want both rows kept", err, len(a), len(txt))
+	}
+	if f.Hits(fake.OpDel) != 1 {
+		t.Errorf("del calls = %d, want 1: the TXT phase must not have run", f.Hits(fake.OpDel))
+	}
+	if err := p.ApplyChanges(context.Background(), changes); err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	if a, txt := rowsByKind(f); len(a) != 0 || len(txt) != 0 {
+		t.Errorf("after second apply: A=%d TXT=%d; want both removed", len(a), len(txt))
+	}
+}
+
+// TestApply_PendingRepairedByEmptyApply covers the other half of invariant I4:
+// an apply that writes nothing still reloads the firewall when an earlier
+// reconfigure failed, so saved and served do not stay apart until the next read.
+func TestApply_PendingRepairedByEmptyApply(t *testing.T) {
+	f := fake.New(t)
+	p := testProvider(t, f)
+	p.cfg.RetryAttempts = 1
+	create := &plan.Changes{Create: []*endpoint.Endpoint{ep("app.example.com", "A", 0, "192.0.2.1")}}
+	f.Inject(fake.Fault{Op: fake.OpReconfigure, Status: 500, Times: 1})
+	if err := p.ApplyChanges(context.Background(), create); err == nil || !p.pending.Load() {
+		t.Fatalf("setup: the reconfigure fault did not leave the apply pending")
+	}
+	if f.Reconfigures() != 0 || len(f.Served()) != 0 {
+		t.Fatalf("reconfigures=%d served=%d; want nothing published yet", f.Reconfigures(), len(f.Served()))
+	}
+	// The row now exists, so this apply writes nothing at all.
+	if err := p.ApplyChanges(context.Background(), create); err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	if f.Hits(fake.OpSet) != 0 || f.Hits(fake.OpAddHostOverride) != 1 || f.Hits(fake.OpDel) != 0 {
+		t.Errorf("second apply wrote: set=%d add=%d del=%d", f.Hits(fake.OpSet), f.Hits(fake.OpAddHostOverride), f.Hits(fake.OpDel))
+	}
+	if p.pending.Load() || f.Reconfigures() != 1 || len(f.Served()) != 1 {
+		t.Errorf("pending=%v reconfigures=%d served=%d", p.pending.Load(), f.Reconfigures(), len(f.Served()))
+	}
+}

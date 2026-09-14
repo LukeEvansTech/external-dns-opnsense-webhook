@@ -40,19 +40,37 @@ func isData(rr string) bool { return rr != recordTypeTXT }
 // applyPhases keeps invariant I1: a registry TXT row is created before the
 // data rows it describes and removed after them. Each phase drains before the
 // next starts, so the ordering holds across a failure boundary too.
+//
+// Ordering alone is not enough, because a phase can fail. gatedOn names the
+// protective phase that must have completed without a failure before this
+// phase may run: creating data rows whose TXT row was not written would leave
+// records nothing claims ownership of, and removing a TXT row whose data rows
+// are still there would strand them the same way. A gated-out phase is skipped
+// for this cycle and converges on the next one, once the protective phase has
+// succeeded. The protective phases themselves always run.
 var applyPhases = []struct {
 	selects func(rr string) bool
 	mode    convergeMode
+	gatedOn int
+	skip    string
 }{
-	{isTXT, modeAddSet},
-	{isData, modeAddSet},
-	{isData, modeRemove},
-	{isTXT, modeRemove},
+	{isTXT, modeAddSet, noGate, ""},
+	{isData, modeAddSet, 0, "skipping data creates: TXT writes failed this cycle"},
+	{isData, modeRemove, noGate, ""},
+	{isTXT, modeRemove, 2, "skipping TXT removes: data deletes failed this cycle"},
 }
 
+// noGate marks a phase that runs unconditionally.
+const noGate = -1
+
 // applyRun is the mutable state of one ApplyChanges. mu guards all of it, the
-// snapshot indexes included: several keys converge concurrently and every one
-// of them can add or remove rows.
+// snapshot index included: several keys converge concurrently and every one of
+// them can add or remove rows.
+//
+// The rows themselves are read and written outside mu. That is safe because a
+// phase gives each rowKey to exactly one goroutine, and a row belongs to
+// exactly one rowKey, so no two workers ever touch the same *hostRow; only the
+// index they hang off is shared, and every path into it takes mu.
 type applyRun struct {
 	p    *Provider
 	snap *Snapshot
@@ -60,6 +78,9 @@ type applyRun struct {
 	mu    sync.Mutex
 	errs  []error
 	wrote bool
+	// phaseFailed counts converge failures within the phase now running; apply
+	// resets it before each phase and reads it once the phase has drained.
+	phaseFailed int
 }
 
 // fail records a converge error and marks the key, so the remove phase knows
@@ -68,7 +89,22 @@ func (r *applyRun) fail(set *desiredSet, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.errs = append(r.errs, err)
+	r.phaseFailed++
 	set.failed = true
+}
+
+// startPhase clears the per-phase failure count; endPhase reports it once the
+// phase has drained.
+func (r *applyRun) startPhase() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.phaseFailed = 0
+}
+
+func (r *applyRun) endPhase() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.phaseFailed
 }
 
 func (r *applyRun) didFail(set *desiredSet) bool {
@@ -186,7 +222,13 @@ func (p *Provider) apply(ctx context.Context, changes *plan.Changes) error {
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i].name < keys[j].name })
 
-	for _, ph := range applyPhases {
+	failures := make([]int, len(applyPhases))
+	for i, ph := range applyPhases {
+		if ph.gatedOn != noGate && failures[ph.gatedOn] > 0 {
+			slog.Warn(ph.skip, "failures", failures[ph.gatedOn])
+			continue
+		}
+		run.startPhase()
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(p.cfg.ApplyWorkers)
 		for _, k := range keys {
@@ -204,9 +246,13 @@ func (p *Provider) apply(ctx context.Context, changes *plan.Changes) error {
 		// Every goroutine returns nil: one key's failure must not cancel the
 		// others, and the errors are collected rather than propagated.
 		_ = g.Wait()
+		failures[i] = run.endPhase()
 	}
 
-	if run.wrote {
+	// A write attempt, committed or not, means saved and served may differ; so
+	// does a reconfigure an earlier apply could not complete. Either way the
+	// firewall is reloaded here rather than left waiting for the next read.
+	if run.wrote || p.pending.Load() {
 		if rerr := p.reconfigure(); rerr != nil {
 			run.errs = append(run.errs, fmt.Errorf("reconfigure: %w", rerr))
 		}
@@ -257,6 +303,13 @@ func (p *Provider) addSet(ctx context.Context, run *applyRun, set *desiredSet, h
 	// a delete, and the name never drops to zero rows on the way (invariant
 	// I2). A row with alias children could not be deleted at all (the delete
 	// guard), so reuse is the only way such a name ever converges.
+	//
+	// Two consequences worth knowing. Reuse rewrites the row's description to
+	// OPNSENSE_OWNER_MARKER, so a hand-made row sitting at a managed name is
+	// adopted rather than left alone. And missing targets are paired with
+	// surplus rows by sorted order, which is deterministic but otherwise
+	// arbitrary: nothing makes a particular target land on a particular uuid,
+	// so an alias child follows whichever target its row is reused for.
 	missing := make([]string, 0, len(targets))
 	for _, t := range targets {
 		if _, ok := byTarget[t]; !ok {

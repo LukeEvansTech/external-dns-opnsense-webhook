@@ -239,3 +239,28 @@ func TestSnapshot_AliasOnTXTParent(t *testing.T) {
 	}
 	t.Fatalf("no TXT endpoint for txtalias.example.com in %v", snap.Endpoints())
 }
+
+func TestSnapshot_DuplicateRowsYieldOneTarget(t *testing.T) {
+	f := fake.New(t)
+	for range 2 {
+		f.AddRow(fake.Row{Hostname: "app", Domain: "example.com", RR: "A", Server: "192.0.2.1", TTL: "300"})
+	}
+	c := testClient(t, f.URL())
+	snap, err := c.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	eps := snap.Endpoints()
+	if len(eps) != 1 {
+		t.Fatalf("eps = %+v, want one endpoint", eps)
+	}
+	if len(eps[0].Targets) != 1 || eps[0].Targets[0] != "192.0.2.1" {
+		t.Errorf("targets = %v, want the duplicate folded away", eps[0].Targets)
+	}
+	if int64(eps[0].RecordTTL) != 300 {
+		t.Errorf("ttl = %d, want 300", eps[0].RecordTTL)
+	}
+	if snap.Total != 2 {
+		t.Errorf("Total = %d; the duplicate row still exists on the firewall", snap.Total)
+	}
+}

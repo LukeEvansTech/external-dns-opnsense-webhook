@@ -18,14 +18,13 @@ type rowKey struct {
 	rr   string
 }
 
-// Snapshot is one consistent read of the host override table with the
-// indexes the apply path needs. Only enabled, non-alias, top-level rows are
-// indexed; disabled rows and children are kept on rows for reads.
+// Snapshot is one consistent read of the host override table with the index
+// the apply path needs. Only enabled, non-alias, top-level rows are indexed;
+// disabled rows and children are kept on rows for reads.
 type Snapshot struct {
-	Total    int
-	rows     []*hostRow
-	byKey    map[rowKey][]*hostRow
-	byTarget map[rowKey]map[string]*hostRow
+	Total int
+	rows  []*hostRow
+	byKey map[rowKey][]*hostRow
 }
 
 // Snapshot pages through searchHostOverride under the consistency rules:
@@ -113,13 +112,12 @@ func (c *Client) readAll(ctx context.Context) ([]hostRow, int, error) {
 // buildSnapshot takes ownership of rows (the caller does not reuse it) and
 // indexes pointers into it, not into s.rows: s.rows is its own []*hostRow,
 // so a later add growing it can never move rows's elements and invalidate
-// the pointers held in byKey/byTarget.
+// the pointers held in byKey.
 func buildSnapshot(rows []hostRow, total int) *Snapshot {
 	s := &Snapshot{
-		Total:    total,
-		rows:     make([]*hostRow, len(rows)),
-		byKey:    map[rowKey][]*hostRow{},
-		byTarget: map[rowKey]map[string]*hostRow{},
+		Total: total,
+		rows:  make([]*hostRow, len(rows)),
+		byKey: map[rowKey][]*hostRow{},
 	}
 	for i := range rows {
 		s.rows[i] = &rows[i]
@@ -143,10 +141,6 @@ func (s *Snapshot) index(r *hostRow) {
 	}
 	k := rowKey{name: joinName(r.Hostname, r.Domain), rr: r.RR}
 	s.byKey[k] = append(s.byKey[k], r)
-	if s.byTarget[k] == nil {
-		s.byTarget[k] = map[string]*hostRow{}
-	}
-	s.byTarget[k][r.bareTarget()] = r
 }
 
 // add records a row the apply path just created. r is copied onto the heap
@@ -168,8 +162,6 @@ func (s *Snapshot) remove(k rowKey, uuid string) {
 	for _, r := range s.byKey[k] {
 		if r.UUID != uuid {
 			kept = append(kept, r)
-		} else {
-			delete(s.byTarget[k], r.bareTarget())
 		}
 	}
 	clear(s.byKey[k][len(kept):])
@@ -190,14 +182,27 @@ func (s *Snapshot) rowsFor(k rowKey) []*hostRow { return s.byKey[k] }
 // warns about once per key.
 type group struct {
 	targets  []string
+	seen     map[string]struct{}
 	ttl      int64
 	haveTTL  bool
 	sawUnset bool
 	differs  bool
 }
 
+// add folds one row into the group. A target already present is not repeated:
+// duplicate rows (the same name, type and target, which nothing stops an
+// operator creating by hand) would otherwise be published as a repeated
+// target and make external-dns plan a change on every pass. Its TTL is still
+// folded, so two duplicates that disagree are still reported as the smallest
+// explicit value rather than whichever row happened to be read first.
 func (g *group) add(target string, ttl int64) {
-	g.targets = append(g.targets, target)
+	if _, dup := g.seen[target]; !dup {
+		if g.seen == nil {
+			g.seen = map[string]struct{}{}
+		}
+		g.seen[target] = struct{}{}
+		g.targets = append(g.targets, target)
+	}
 	if ttl == 0 {
 		g.sawUnset = true
 		if g.haveTTL {
