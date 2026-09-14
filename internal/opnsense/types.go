@@ -37,8 +37,6 @@ const (
 	// provider only accepts ASCII.
 	maxTXTBytes = 255
 	// maxTTL is the Unbound model's IntegerField ceiling for ttl.
-	//
-	//nolint:unused // consumed by names.go in a later task
 	maxTTL = 2147483647
 )
 
