@@ -14,6 +14,12 @@ func TestNames_Join(t *testing.T) {
 	if got := joinName("", "example.com"); got != "example.com" {
 		t.Errorf("join empty host = %q", got)
 	}
+	if got := joinName("..", "example.com"); got != "example.com" {
+		t.Errorf("join dots-only host = %q", got)
+	}
+	if got := joinName("host", ""); got != "host" {
+		t.Errorf("join empty domain = %q", got)
+	}
 }
 
 func TestNames_Split(t *testing.T) {
@@ -31,6 +37,9 @@ func TestNames_Split(t *testing.T) {
 		{"example.com", "", "", ErrApexName},
 		{"*.example.com", "", "", ErrWildcard},
 		{"other.org", "", "", ErrNameOutsideDomains},
+		{"internal.example.com", "", "", ErrApexName},
+		{"", "", "", ErrNameOutsideDomains},
+		{"*.EXAMPLE.COM.", "", "", ErrWildcard},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -52,6 +61,11 @@ func TestNames_InDomains(t *testing.T) {
 	domains := []string{"example.com"}
 	if !inDomains("x.example.com", domains) || inDomains("badexample.com", domains) || !inDomains("example.com", domains) {
 		t.Error("inDomains label-boundary rule broken")
+	}
+	// inDomains trusts Config.Validate to have already normalised the
+	// configured domains; a lingering trailing dot is not tolerated here.
+	if inDomains("app.example.com", []string{"example.com."}) {
+		t.Error("inDomains should not match against an un-normalised configured domain")
 	}
 }
 

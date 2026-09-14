@@ -17,10 +17,24 @@ func normaliseName(s string) string {
 // joined names so hand-made rows split differently are still found.
 func joinName(hostname, domain string) string {
 	h, d := normaliseName(hostname), normaliseName(domain)
+	if strings.Trim(h, ".") == "" {
+		h = ""
+	}
 	if h == "" {
 		return d
 	}
+	if d == "" {
+		return h
+	}
 	return h + "." + d
+}
+
+// matchesDomain reports whether name equals domain or is a name under it,
+// matching at a label boundary: "badexample.com" does not match
+// "example.com". domain is compared as given; callers pass already
+// normalised configured domains.
+func matchesDomain(name, domain string) bool {
+	return name == domain || strings.HasSuffix(name, "."+domain)
 }
 
 // inDomains reports whether name is a configured domain or a name under one,
@@ -28,7 +42,7 @@ func joinName(hostname, domain string) string {
 func inDomains(name string, domains []string) bool {
 	name = normaliseName(name)
 	for _, d := range domains {
-		if name == d || strings.HasSuffix(name, "."+d) {
+		if matchesDomain(name, d) {
 			return true
 		}
 	}
@@ -43,7 +57,7 @@ func splitName(name string, domains []string) (string, string, error) {
 	name = normaliseName(name)
 	best := ""
 	for _, d := range domains {
-		if (name == d || strings.HasSuffix(name, "."+d)) && len(d) > len(best) {
+		if matchesDomain(name, d) && len(d) > len(best) {
 			best = d
 		}
 	}
