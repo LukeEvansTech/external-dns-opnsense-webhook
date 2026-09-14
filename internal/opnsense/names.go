@@ -75,8 +75,6 @@ func splitName(name string, domains []string) (string, string, error) {
 }
 
 // isWildcard reports whether a name carries a wildcard label.
-//
-//nolint:unused // consumed by AdjustEndpoints in a later task
 func isWildcard(name string) bool { return strings.Contains(name, "*") }
 
 // clampTTL maps an external-dns TTL onto the model's range: unset or

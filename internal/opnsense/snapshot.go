@@ -152,8 +152,6 @@ func (s *Snapshot) index(r *hostRow) {
 // add records a row the apply path just created. r is copied onto the heap
 // once (p := &r) and that pointer, not an index into s.rows, is what gets
 // appended and indexed, so a later append growing s.rows never moves it.
-//
-//nolint:unused // consumed by ApplyChanges in a later task
 func (s *Snapshot) add(r hostRow) {
 	p := &r
 	s.rows = append(s.rows, p)
@@ -165,8 +163,6 @@ func (s *Snapshot) add(r hostRow) {
 // kept alive by a stale slice element. rowsFor aliases this same backing
 // array, so a caller that deletes while iterating rowsFor's result must
 // iterate a copy, not the slice rowsFor returned.
-//
-//nolint:unused // consumed by ApplyChanges in a later task
 func (s *Snapshot) remove(k rowKey, uuid string) {
 	kept := s.byKey[k][:0]
 	for _, r := range s.byKey[k] {
@@ -183,8 +179,6 @@ func (s *Snapshot) remove(k rowKey, uuid string) {
 // rowsFor returns the rows for k. The slice aliases byKey's backing array,
 // which remove compacts in place: a caller that calls remove while iterating
 // this result must iterate a copy instead.
-//
-//nolint:unused // consumed by ApplyChanges in a later task
 func (s *Snapshot) rowsFor(k rowKey) []*hostRow { return s.byKey[k] }
 
 // group accumulates one (name, type) record set while Endpoints folds rows.
