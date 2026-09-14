@@ -8,12 +8,14 @@ import (
 )
 
 // opAddHostOverride names the addHostOverride operation for error reporting.
-// Defined here temporarily; Task 6 moves it into client.go alongside the
+// Defined here temporarily; Task 7 moves it into client.go alongside the
 // other operation names.
 const opAddHostOverride = "add_host_override"
 
-// flexBool decodes the several spellings OPNsense uses for booleans: JSON
-// true/false (isAlias), "0"/"1" strings (enabled, addptr), and bare numbers.
+// flexBool decodes the JSON true/false and "0"/"1"/bare-number spellings
+// OPNsense's model layer produces for a boolean field. In this package it
+// decodes isAlias only; enabled and addptr stay raw strings on hostRow, with
+// enabled read through hostRow.enabled() rather than a flexBool field.
 type flexBool bool
 
 func (b *flexBool) UnmarshalJSON(data []byte) error {
@@ -71,12 +73,9 @@ type hostRow struct {
 	Children    []hostRow `json:"_children"`
 }
 
-//nolint:unused // consumed by names.go/transport.go in a later task
 func (r hostRow) enabled() bool { return r.Enabled != "0" && r.Enabled != "" }
 
 // ttlValue returns the row's TTL or 0 when unset.
-//
-//nolint:unused // consumed by names.go/transport.go in a later task
 func (r hostRow) ttlValue() int64 {
 	if r.TTL == "" {
 		return 0
@@ -89,8 +88,6 @@ func (r hostRow) ttlValue() int64 {
 }
 
 // target is the endpoint target this row represents.
-//
-//nolint:unused // consumed by names.go/transport.go in a later task
 func (r hostRow) target() string {
 	switch r.RR {
 	case recordTypeTXT:
