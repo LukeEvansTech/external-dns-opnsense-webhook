@@ -71,16 +71,24 @@ func (c *Config) Validate() error {
 	if u.Scheme == "" || u.Host == "" {
 		return fmt.Errorf("OPNSENSE_HOST %q must include a scheme and host (e.g. https://fw.example.com)", c.Host)
 	}
+	if u.Path != "" && u.Path != "/" {
+		return fmt.Errorf("OPNSENSE_HOST %q must not include a path", c.Host)
+	}
 	c.Host = strings.TrimRight(c.Host, "/")
 
 	if len(c.Domains) == 0 {
 		return errors.New("OPNSENSE_DOMAINS must list at least one domain")
 	}
+	seen := make(map[string]bool, len(c.Domains))
 	for i, d := range c.Domains {
 		d = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(d, ".")))
 		if d == "" || strings.HasPrefix(d, ".") || strings.Contains(d, "..") {
 			return fmt.Errorf("OPNSENSE_DOMAINS entry %d (%q) is not a valid domain", i, c.Domains[i])
 		}
+		if seen[d] {
+			return fmt.Errorf("OPNSENSE_DOMAINS entry %d (%q) is a duplicate", i, c.Domains[i])
+		}
+		seen[d] = true
 		c.Domains[i] = d
 	}
 	if c.OwnerMarker == "" {

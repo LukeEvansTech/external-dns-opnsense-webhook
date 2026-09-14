@@ -3,6 +3,7 @@ package opnsense
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -37,7 +38,10 @@ func (e *NetworkError) Error() string {
 }
 func (e *NetworkError) Unwrap() error { return e.Err }
 
-// APIError is a non-2xx HTTP response.
+// APIError represents an HTTP response the caller could not treat as
+// successful: a non-2xx status, or a 2xx response whose body reports a
+// non-ok status. Check StatusCode rather than assuming it is outside the
+// 2xx range.
 type APIError struct {
 	Operation  string
 	StatusCode int
@@ -71,9 +75,14 @@ func (e *WriteError) Error() string {
 	if len(e.Validations) == 0 {
 		return fmt.Sprintf("opnsense: %s returned result %q", e.Operation, e.Result)
 	}
-	parts := make([]string, 0, len(e.Validations))
-	for field, msgs := range e.Validations {
-		parts = append(parts, field+": "+strings.Join(msgs, "; "))
+	fields := make([]string, 0, len(e.Validations))
+	for field := range e.Validations {
+		fields = append(fields, field)
+	}
+	sort.Strings(fields)
+	parts := make([]string, 0, len(fields))
+	for _, field := range fields {
+		parts = append(parts, field+": "+strings.Join(e.Validations[field], "; "))
 	}
 	return fmt.Sprintf("opnsense: %s returned result %q (%s)", e.Operation, e.Result, strings.Join(parts, ", "))
 }
