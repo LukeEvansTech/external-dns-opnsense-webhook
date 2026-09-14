@@ -1,0 +1,23 @@
+---
+name: Security Scans
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    permissions:
+      contents: read
+      security-events: write
+    uses: LukeEvansTech/shared-workflows/.github/workflows/security-scans.yml@239610499ad65c397d8d90b1a139d041bf28598a # v1
+    with:
+      checkov-frameworks: github_actions,dockerfile
+      trivy-scanners: vuln,secret,misconfig

@@ -1,0 +1,49 @@
+[settings]
+lockfile = true
+
+[tools]
+actionlint = "1.7.12"
+go = "1.27.1"
+"go:golang.org/x/vuln/cmd/govulncheck" = "v1.8.0"
+golangci-lint = "2.13.2"
+zizmor = "1.30.1"
+
+[tasks.fmt]
+description = "Run go fmt against code"
+run = "go fmt ./..."
+
+[tasks.vet]
+description = "Run go vet against code"
+run = "go vet ./..."
+
+[tasks.vulncheck]
+description = "Scan for known vulnerabilities with govulncheck"
+run = "govulncheck ./..."
+
+[tasks.test]
+description = "Run unit tests with the race detector and coverage"
+run = "go test -race $(go list ./...) -coverprofile cover.out"
+
+[tasks.test-e2e]
+description = "Run the binary against the fake OPNsense at protocol level"
+run = "go test -tags e2e -timeout 5m -v ./test/e2e/..."
+
+[tasks.test-reconcile]
+description = "Run external-dns's planner and TXT registry against the binary and the fake"
+run = "go test -tags reconcile -timeout 10m -v ./test/reconcile/..."
+
+[tasks.test-integration]
+description = "Run against a real firewall (needs OPNSENSE_* env)"
+run = "go test -tags integration -timeout 15m -v ./test/integration/..."
+
+[tasks.lint]
+description = "Run golangci-lint"
+run = "golangci-lint run"
+
+[tasks.lint-fix]
+description = "Run golangci-lint with --fix"
+run = "golangci-lint run --fix"
+
+[tasks.lint-workflows]
+description = "Lint GitHub Actions workflows"
+run = ["actionlint", "zizmor --min-severity medium .github/workflows"]
