@@ -196,9 +196,9 @@ func decodeBody[T any](w http.ResponseWriter, r *http.Request, route string) (T,
 }
 
 // writeJSON encodes v as the versioned-media-type response shared by the
-// Records and AdjustEndpoints handlers. A failed encode is logged but not
-// surfaced — the 200 status line is already on the wire by then. what labels
-// the log message ("records", "endpoints").
+// Records and AdjustEndpoints handlers. A failed encode is logged under what,
+// which names the payload ("records", "endpoints"), but is not surfaced to the
+// client, because the 200 status line is already on the wire by then.
 func writeJSON(w http.ResponseWriter, r *http.Request, v any, what string) {
 	w.Header().Set(contentTypeHeader, string(mediaTypeVersion1))
 	w.Header().Set(varyHeader, contentTypeHeader)

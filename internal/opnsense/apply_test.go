@@ -248,6 +248,11 @@ func TestApply_NoWritesNoReconfigure(t *testing.T) {
 	}
 }
 
+// TestApply_InvalidTXTFailsThatEndpointOnly holds invariant I1 for a registry
+// TXT the fold rejected rather than one whose write failed. The row is equally
+// absent either way, so the A row it would have claimed is not created on this
+// cycle; nothing is written at all, so no reconfigure follows; and the next
+// plan carrying a valid TXT converges both rows.
 func TestApply_InvalidTXTFailsThatEndpointOnly(t *testing.T) {
 	f := fake.New(t)
 	p := testProvider(t, f)
@@ -258,8 +263,28 @@ func TestApply_InvalidTXTFailsThatEndpointOnly(t *testing.T) {
 	if !errors.Is(err, ErrTXTInvalid) {
 		t.Fatalf("err = %v", err)
 	}
-	if a, txt := rowsByKind(f); len(a) != 1 || len(txt) != 0 {
-		t.Errorf("A=%d TXT=%d", len(a), len(txt))
+	if !strings.Contains(err.Error(), "TXT k8s.main.a-app.example.com") {
+		t.Errorf("err = %v; want the rejected TXT named", err)
+	}
+	if a, txt := rowsByKind(f); len(a) != 0 || len(txt) != 0 {
+		t.Errorf("A=%d TXT=%d; want the data create gated on the rejected TXT", len(a), len(txt))
+	}
+	if f.Hits(fake.OpAddHostOverride) != 0 {
+		t.Errorf("add calls = %d, want 0: the data phase must not have run", f.Hits(fake.OpAddHostOverride))
+	}
+	// Nothing reached the firewall, so there is no saved-versus-served gap to
+	// close and the reload is not owed.
+	if f.Reconfigures() != 0 {
+		t.Errorf("reconfigures = %d, want 0 when nothing was written", f.Reconfigures())
+	}
+	if err := p.ApplyChanges(context.Background(), &plan.Changes{Create: []*endpoint.Endpoint{
+		ep("app.example.com", "A", 0, "192.0.2.1"),
+		ep("k8s.main.a-app.example.com", "TXT", 0, label),
+	}}); err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	if a, txt := rowsByKind(f); len(a) != 1 || len(txt) != 1 {
+		t.Errorf("after second apply: A=%d TXT=%d; want both converged", len(a), len(txt))
 	}
 }
 

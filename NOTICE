@@ -5,10 +5,9 @@ This repository started from the source of external-dns-unifi-webhook
 (https://github.com/home-operations/external-dns-unifi-webhook), Copyright
 kashalls, onedr0p and the home-operations contributors, licensed under the
 Apache License, Version 2.0. The webhook protocol adapter, HTTP servers,
-readiness cache, metrics, configuration, dnsprovider and httpx packages,
-the e2e and integration test harnesses, and the UniFi provider and client
-packages (kept as a placeholder until the OPNsense provider replaces them)
-are derived from that work.
+readiness cache, metrics, configuration, dnsprovider and httpx packages and
+the e2e and integration test harnesses are derived from that work; the
+OPNsense provider and client are new.
 
 The idea of driving OPNsense Unbound host overrides from external-dns comes
 from external-dns-opnsense-webhook by crutonjohn

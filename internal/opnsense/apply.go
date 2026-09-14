@@ -212,13 +212,19 @@ func (r *applyRun) retarget(k rowKey, row *hostRow, f hostFields) {
 // being replaced and is read from the snapshot instead. Endpoints that fail
 // validation are reported and skipped; nothing else in the plan is affected.
 //
+// The third return is how many distinct keys were dropped for an invalid TXT
+// target. Those keys never reach a phase, so apply counts them against the TXT
+// add/set phase instead: a registry row rejected here is as absent as one whose
+// write failed, and invariant I1 holds either way.
+//
 // Two endpoints can name the same key. Identical content is harmless — the
 // second is simply redundant — but two that disagree describe a plan with no
 // single answer, so both are dropped with an error rather than letting
 // whichever the map iteration reached last silently win.
-func (p *Provider) foldChanges(changes *plan.Changes) (map[rowKey]*desiredSet, []error) {
+func (p *Provider) foldChanges(changes *plan.Changes) (map[rowKey]*desiredSet, []error, int) {
 	sets := map[rowKey]*desiredSet{}
 	conflicted := map[rowKey]bool{}
+	rejectedTXT := map[rowKey]bool{}
 	var errs []error
 
 	define := func(e *endpoint.Endpoint, empty bool) {
@@ -249,6 +255,7 @@ func (p *Provider) foldChanges(changes *plan.Changes) (map[rowKey]*desiredSet, [
 				if terr != nil {
 					metrics.Get().TXTInvalidTotal.WithLabelValues(metrics.ProviderName).Inc()
 					errs = append(errs, fmt.Errorf("TXT %s: %w", name, terr))
+					rejectedTXT[k] = true
 					return
 				}
 				set.targets[bare] = struct{}{}
@@ -275,7 +282,7 @@ func (p *Provider) foldChanges(changes *plan.Changes) (map[rowKey]*desiredSet, [
 	for _, e := range changes.UpdateNew {
 		define(e, false)
 	}
-	return sets, errs
+	return sets, errs, len(rejectedTXT)
 }
 
 // sameSet reports whether two definitions of one key ask for the same thing.
@@ -293,13 +300,16 @@ func sameSet(a, b *desiredSet) bool {
 
 // apply runs the four phases from the design: TXT add/set, data add/set, data
 // remove, TXT remove. Each phase drains before the next so a data row never
-// exists without its TXT row across a failure boundary.
+// exists without its TXT row across a failure boundary. A TXT target the fold
+// rejected is counted as a failure of the TXT add/set phase before the phases
+// run, so the same gate that holds after a failed registry write also holds
+// after an invalid one.
 func (p *Provider) apply(ctx context.Context, changes *plan.Changes) error {
 	snap, err := p.client.Snapshot(ctx)
 	if err != nil {
 		return err
 	}
-	sets, errs := p.foldChanges(changes)
+	sets, errs, rejectedTXT := p.foldChanges(changes)
 	run := &applyRun{p: p, snap: snap, errs: errs}
 
 	keys := make([]rowKey, 0, len(sets))
@@ -308,7 +318,12 @@ func (p *Provider) apply(ctx context.Context, changes *plan.Changes) error {
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i].name < keys[j].name })
 
+	// Seeded, not assigned in the loop: a key the fold dropped for an invalid
+	// TXT target is not in sets at all, so the TXT phase can only ever report
+	// zero failures for it, and the data rows it was to claim would be created
+	// with nothing recording who owns them.
 	failures := make([]int, len(applyPhases))
+	failures[phaseTXTAdd] = rejectedTXT
 	for i, ph := range applyPhases {
 		selected := make([]*desiredSet, 0, len(keys))
 		for _, k := range keys {
@@ -340,7 +355,7 @@ func (p *Provider) apply(ctx context.Context, changes *plan.Changes) error {
 		// Every goroutine returns nil: one key's failure must not cancel the
 		// others, and the errors are collected rather than propagated.
 		_ = g.Wait()
-		failures[i] = run.endPhase()
+		failures[i] += run.endPhase()
 	}
 
 	// A write attempt, committed or not, means saved and served may differ; so
