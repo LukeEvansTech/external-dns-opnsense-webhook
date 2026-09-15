@@ -200,3 +200,37 @@ func TestRecordReconfigure_LabelsOkAndError(t *testing.T) {
 		t.Errorf("reconfigure_total{result=error} = %v, want 1", got)
 	}
 }
+
+func TestBuild_PreCreatesClosedSetChildren(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	build(promauto.With(reg), "test")
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	children := map[string]int{}
+	for _, f := range families {
+		for _, m := range f.GetMetric() {
+			if m.GetCounter() != nil && m.GetCounter().GetValue() != 0 {
+				t.Errorf("%s child starts at %v, want 0", f.GetName(), m.GetCounter().GetValue())
+			}
+		}
+		children[f.GetName()] = len(f.GetMetric())
+	}
+	want := map[string]int{
+		"externaldns_webhook_opnsense_delete_blocked_total":    1,
+		"externaldns_webhook_opnsense_txt_invalid_total":       1,
+		"externaldns_webhook_opnsense_pages_fetched_total":     1,
+		"externaldns_webhook_opnsense_read_restarts_total":     1,
+		"externaldns_webhook_opnsense_reconfigure_total":       2,
+		"externaldns_webhook_opnsense_endpoints_dropped_total": len(DropReasons),
+		"externaldns_webhook_changes_total":                    3,
+	}
+	for name, n := range want {
+		if children[name] != n {
+			t.Errorf("%s: %d children at startup, want %d", name, children[name], n)
+		}
+	}
+}
