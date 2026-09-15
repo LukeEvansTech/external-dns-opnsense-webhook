@@ -125,37 +125,37 @@ func (p *Provider) AdjustEndpoints(in []*endpoint.Endpoint) ([]*endpoint.Endpoin
 }
 
 // dropReason names why an endpoint cannot be written, or "" when it can. The
-// set of reasons is closed — type, wildcard, set-identifier, apex, domain,
-// name, txt — because it is a metric label, and it mirrors what the write path
+// set of reasons is closed (metrics.DropReasons) because it is a metric label,
+// and each reason's counter child exists from startup; it mirrors what the write path
 // rejects: an endpoint external-dns is allowed to keep desiring but the
 // provider can never create is a plan that never converges, and external-dns
 // would retry it every pass forever.
 func (p *Provider) dropReason(e *endpoint.Endpoint, name string) string {
 	switch {
 	case e.RecordType != recordTypeA && e.RecordType != recordTypeAAAA && e.RecordType != recordTypeTXT:
-		return "type"
+		return metrics.DropReasonType
 	case e.SetIdentifier != "":
 		// Host overrides have no way to hold two record sets of the same name
 		// and type apart, so a weighted or latency policy cannot be expressed.
-		return "set-identifier"
+		return metrics.DropReasonSetIdentifier
 	case isWildcard(name):
-		return "wildcard"
+		return metrics.DropReasonWildcard
 	}
 	if _, _, err := splitName(name, p.cfg.Domains); err != nil {
 		switch {
 		case errors.Is(err, ErrApexName):
-			return "apex"
+			return metrics.DropReasonApex
 		case errors.Is(err, ErrNameOutsideDomains):
-			return "domain"
+			return metrics.DropReasonDomain
 		default:
-			return "name"
+			return metrics.DropReasonName
 		}
 	}
 	if e.RecordType == recordTypeTXT {
 		for _, t := range e.Targets {
 			if _, err := validateTXT(t); err != nil {
 				metrics.Get().TXTInvalidTotal.WithLabelValues(metrics.ProviderName).Inc()
-				return "txt"
+				return metrics.DropReasonTXT
 			}
 		}
 	}

@@ -16,11 +16,24 @@ const (
 	histogramBucketCount = 8
 
 	// Prometheus label names reused across metric definitions.
-	labelProvider   = "provider"
-	labelEndpoint   = "endpoint"
-	labelRecordType = "record_type"
-	labelOperation  = "operation"
-	labelMethod     = "method"
+	labelProvider = "provider"
+
+	// Reasons AdjustEndpoints drops an endpoint. The set is closed because it
+	// is a metric label; Provider.dropReason returns nothing outside it.
+	DropReasonType          = "type"
+	DropReasonSetIdentifier = "set-identifier"
+	DropReasonWildcard      = "wildcard"
+	DropReasonApex          = "apex"
+	DropReasonDomain        = "domain"
+	DropReasonName          = "name"
+	DropReasonTXT           = "txt"
+
+	reconfigureOK    = "ok"
+	reconfigureError = "error"
+	labelEndpoint    = "endpoint"
+	labelRecordType  = "record_type"
+	labelOperation   = "operation"
+	labelMethod      = "method"
 )
 
 // Metrics holds all Prometheus metrics for the webhook.
@@ -352,8 +365,41 @@ func build(f promauto.Factory, version string) *Metrics {
 	}
 
 	m.Info.WithLabelValues(version, ProviderName).Set(1)
+	m.preCreateChildren()
 
 	return m
+}
+
+// DropReasons lists every value the endpoints_dropped reason label can take.
+var DropReasons = []string{
+	DropReasonType,
+	DropReasonSetIdentifier,
+	DropReasonWildcard,
+	DropReasonApex,
+	DropReasonDomain,
+	DropReasonName,
+	DropReasonTXT,
+}
+
+// preCreateChildren creates the counter children whose label sets are closed,
+// so each series exists at zero from startup. A counter that first appears
+// mid-window with a non-zero value has no earlier sample for increase() or
+// rate() to diff against, and its first increment is invisible to an alert;
+// starting every known series at zero makes the first increment a real delta.
+func (m *Metrics) preCreateChildren() {
+	m.DeleteBlockedTotal.WithLabelValues(ProviderName)
+	m.TXTInvalidTotal.WithLabelValues(ProviderName)
+	m.PagesFetchedTotal.WithLabelValues(ProviderName)
+	m.ReadRestartsTotal.WithLabelValues(ProviderName)
+	for _, result := range []string{reconfigureOK, reconfigureError} {
+		m.ReconfigureTotal.WithLabelValues(ProviderName, result)
+	}
+	for _, reason := range DropReasons {
+		m.EndpointsDroppedTotal.WithLabelValues(ProviderName, reason)
+	}
+	for _, op := range []string{"create", "update", "delete"} {
+		m.ChangesTotal.WithLabelValues(ProviderName, op)
+	}
 }
 
 // RecordHTTPRequest records HTTP request metrics.
@@ -378,9 +424,9 @@ func (m *Metrics) RecordAPICall(operation string, duration time.Duration, respon
 
 // RecordReconfigure counts one Unbound reconfigure attempt by outcome.
 func (m *Metrics) RecordReconfigure(err error) {
-	result := "ok"
+	result := reconfigureOK
 	if err != nil {
-		result = "error"
+		result = reconfigureError
 	}
 	m.ReconfigureTotal.WithLabelValues(ProviderName, result).Inc()
 }
