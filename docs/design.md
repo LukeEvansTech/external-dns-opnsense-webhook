@@ -102,7 +102,7 @@ non-zero before the server starts.
 | `OPNSENSE_OWNER_MARKER`                                                                               | `external-dns`                 | Written into `description` on every managed row (for operators filtering the grid, and for the startup served-state check in section 8). Never used for ownership decisions.                                               |
 | `OPNSENSE_PAGE_SIZE`                                                                                  | `150`                          | `rowCount` per `searchHostOverride` page. 1..500.                                                                                                                                                                          |
 | `OPNSENSE_READ_ATTEMPTS`                                                                              | `3`                            | Full re-reads allowed when a paginated read is inconsistent (section 6.1).                                                                                                                                                 |
-| `OPNSENSE_APPLY_WORKERS`                                                                              | `4`                            | Bounded concurrency across names inside one apply phase. 1..32.                                                                                                                                                            |
+| `OPNSENSE_APPLY_WORKERS`                                                                              | `1`                            | Goroutines converging names inside one apply phase. 1..32. Orchestration only: every write to the firewall is serialised behind one mutex whatever this is set to (section 6.2, step 4).                                   |
 | `OPNSENSE_RETRY_ATTEMPTS` / `_INITIAL_DELAY` / `_MAX_DELAY`                                           | `3` / `500ms` / `10s`          | Retry only idempotent calls and any 429 (section 7).                                                                                                                                                                       |
 | `OPNSENSE_REQUEST_TIMEOUT`                                                                            | `20s`                          | Per-call context timeout on the firewall API.                                                                                                                                                                              |
 | `OPNSENSE_RECONFIGURE_TIMEOUT`                                                                        | `45s`                          | `service/reconfigure` stops and starts Unbound and waits up to 10 s for the pid.                                                                                                                                           |
@@ -229,7 +229,14 @@ Algorithm:
   write.
 - **4. Phases**, each drained before the next, names inside a phase spread over
   an `errgroup` with `SetLimit(APPLY_WORKERS)`, every step inside a name
-  sequential:
+  sequential. That concurrency is orchestration only: the client holds one
+  mutex across every `addHostOverride`, `setHostOverride` and
+  `delHostOverride`, so the firewall never sees two mutating calls at once
+  whatever `APPLY_WORKERS` is. OPNsense's config save is load-modify-write with
+  no lock around it, and two concurrent saves can each answer `saved` while
+  only one row survives: on the 2026-09-15 cutover, with four workers, 2 of 282
+  acknowledged adds were never saved. Reads and `reconfigure` are not held by
+  the write mutex. The phases:
   - **1.** create and set TXT rows;
   - **2.** create and set A/AAAA rows (`setHostOverride` on kept rows whose
     `ttl` or `description` differ, `addHostOverride` for missing targets);
@@ -247,6 +254,20 @@ Algorithm:
   phase, not per name; a skipped phase converges on the next reconcile by I3.
   Within a phase, one name's failure never stops another name. Errors are
   collected with `errors.Join`.
+
+  After each phase that wrote, the provider re-reads the table (the same
+  consistent paginated read as 6.1, one read per writing phase) and checks
+  every acknowledged write: a created or updated row is present and reads as
+  written on the fields the converge compares (name, type, target, ttl,
+  description, addptr), a deleted row is gone. A write the firewall
+  acknowledged but did not keep is logged at error with name, type and uuid,
+  counted in `externaldns_webhook_opnsense_lost_writes_total{operation}`, and
+  recorded as that phase's failure, so the gate above holds for the phases
+  after it: a lost registry TXT blocks the data creates, a lost data delete
+  keeps the registry row. `ApplyChanges` returns an error naming the write,
+  and the next reconcile converges by I3. The rows that did land are still
+  reconfigured. The read is a safety net, not a gate: if it fails, that is
+  logged and the apply carries on.
 
 - **5. Deletes never cascade silently.** `delHostOverride` deletes the row's
   aliases with it, so a row with any enabled `_children` is never deleted by
@@ -367,13 +388,16 @@ Algorithm:
   `externaldns_webhook_opnsense_apply_duration_seconds`,
   `externaldns_webhook_opnsense_delete_blocked_total`,
   `externaldns_webhook_opnsense_endpoints_dropped_total{reason}`,
-  `externaldns_webhook_opnsense_txt_invalid_total`. `README.md` lists the whole
-  set with its labels.
+  `externaldns_webhook_opnsense_txt_invalid_total`,
+  `externaldns_webhook_opnsense_lost_writes_total{operation}` (writes the
+  firewall acknowledged that the re-read after the phase showed were not
+  saved). `README.md` lists the whole set with its labels.
 - Logs: `log/slog` JSON; every write logs name, type, target, uuid and outcome
   at info; the raw table is never logged, even at debug.
 - Alerts for the consuming cluster to define: `ExternalDNSStale` (no successful
   sync for 15 min), `OPNsensePendingReconfigure` (gauge 1 for 10 min),
-  `OPNsenseDeleteBlocked` (counter increased in the last hour).
+  `OPNsenseDeleteBlocked` (counter increased in the last hour),
+  `OPNsenseLostWrite` (lost-writes counter increased in the last hour).
 
 ## 9. Cluster-side changes
 
@@ -402,8 +426,10 @@ credentials.
   only on idempotent calls; readiness cache and detachment; listeners answer
   `GET /` before the upstream probe has finished.
 - Fake (`test/fake`): in-memory config table with the real row shape, a
-  separate served table that only `reconfigure` publishes, and fault injection
-  per operation (fail once, time out after commit, return `failed`).
+  separate served table that only `reconfigure` publishes, fault injection per
+  operation (fail once, time out after commit, return `failed`, acknowledge a
+  write without saving it), and a record of the most write requests ever in
+  flight at once.
 - Reconcile suite (`test/reconcile`, runs in CI): imports external-dns
   v0.22.0's `plan`, `registry/txt` and `provider/webhook` client packages and
   drives them against the real binary and the fake, so the planner, the TXT
@@ -414,9 +440,10 @@ credentials.
   ignored; fault injection at each step (TXT create succeeds then A create
   fails; A create committed but response lost; partial update; A delete
   succeeds then TXT delete fails; reconfigure fails and the next plan is empty;
-  process restart with a pending reconfigure). Each scenario must reach the
-  desired state within three reconciles with no manual step, and both the
-  config table and the served table are asserted.
+  TXT create, A create, update and A delete each acknowledged by the firewall
+  but not saved; process restart with a pending reconfigure). Each scenario
+  must reach the desired state within three reconciles with no manual step,
+  and both the config table and the served table are asserted.
 - End-to-end (`-tags e2e`, CI on PRs): protocol level against the fake:
   negotiate, records, apply with a create and a delete, 406/413, readiness
   reflecting upstream failure.
@@ -425,8 +452,9 @@ credentials.
   leftovers at start, cleanup at end. Includes the TXT round trip, the
   local-data-before-cache ordering (query a name, get NXDOMAIN, add it,
   reconfigure, query again), a timed 282-row create-and-delete batch recorded
-  in the run log, and a read-only look at what a wildcard row makes Unbound
-  serve for the apex, an explicit child and a missing child.
+  in the run log and read back after each half so every acknowledged row is
+  proven present and then absent, and a read-only look at what a wildcard row
+  makes Unbound serve for the apex, an explicit child and a missing child.
 - Known-bad control: every test that asserts "nothing was written" or "nothing
   unrelated changed" is paired with a case that proves the assertion fires.
 
