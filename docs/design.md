@@ -131,8 +131,11 @@ to `OPNSENSE_APPLY_TIMEOUT` plus `OPNSENSE_RECONFIGURE_TIMEOUT` (165 s by
 default); `main` exits non-zero at startup if that sum exceeds
 `SERVER_WRITE_TIMEOUT`. Measured on the firewall on 2026-09-14 by the
 integration suite: a 282-row batch took 8.3 s to create and 7.7 s to delete
-(three runs within 1 s of each other), so the 120 s apply budget carries more
-than a tenfold margin. OPNsense stores an uncompressed IPv6 literal verbatim,
+(three runs within 1 s of each other) with four workers. Writes are now
+serialised (6.2), so a batch of that size takes roughly four times longer plus
+its verification reads; the 120 s apply budget still carries a margin of
+several times, to be re-measured by the integration suite before the next
+release. OPNsense stores an uncompressed IPv6 literal verbatim,
 so A/AAAA targets are compared as written.
 
 Startup order: parse config, bind both listeners, then probe the firewall.
@@ -256,7 +259,9 @@ Algorithm:
   collected with `errors.Join`.
 
   After each phase that wrote, the provider re-reads the table (the same
-  consistent paginated read as 6.1, one read per writing phase) and checks
+  consistent paginated read as 6.1, one read per writing phase, so at most
+  four per apply, each three calls at 150 rows a page, all inside
+  `OPNSENSE_APPLY_TIMEOUT`) and checks
   every acknowledged write: a created or updated row is present and reads as
   written on the fields the converge compares (name, type, target, `ttl`,
   `description`, `addptr`), a deleted row is gone. A write the firewall
@@ -391,7 +396,9 @@ Algorithm:
   `externaldns_webhook_opnsense_txt_invalid_total`,
   `externaldns_webhook_opnsense_lost_writes_total{operation}` (writes the
   firewall acknowledged that the re-read after the phase showed were not
-  saved). `README.md` lists the whole set with its labels.
+  saved), `externaldns_webhook_opnsense_verify_reads_failed_total` (verification
+  reads that failed, so that apply's writes went unverified). `README.md` lists
+  the whole set with its labels.
 - Logs: `log/slog` JSON; every write logs name, type, target, uuid and outcome
   at info; the raw table is never logged, even at debug.
 - Alerts for the consuming cluster to define: `ExternalDNSStale` (no successful

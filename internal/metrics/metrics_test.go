@@ -221,14 +221,15 @@ func TestBuild_PreCreatesClosedSetChildren(t *testing.T) {
 		children[f.GetName()] = len(f.GetMetric())
 	}
 	want := map[string]int{
-		"externaldns_webhook_opnsense_delete_blocked_total":    1,
-		"externaldns_webhook_opnsense_txt_invalid_total":       1,
-		"externaldns_webhook_opnsense_pages_fetched_total":     1,
-		"externaldns_webhook_opnsense_read_restarts_total":     1,
-		"externaldns_webhook_opnsense_reconfigure_total":       2,
-		"externaldns_webhook_opnsense_endpoints_dropped_total": len(DropReasons),
-		"externaldns_webhook_changes_total":                    3,
-		"externaldns_webhook_opnsense_lost_writes_total":       3,
+		"externaldns_webhook_opnsense_delete_blocked_total":      1,
+		"externaldns_webhook_opnsense_txt_invalid_total":         1,
+		"externaldns_webhook_opnsense_pages_fetched_total":       1,
+		"externaldns_webhook_opnsense_read_restarts_total":       1,
+		"externaldns_webhook_opnsense_reconfigure_total":         2,
+		"externaldns_webhook_opnsense_endpoints_dropped_total":   len(DropReasons),
+		"externaldns_webhook_changes_total":                      3,
+		"externaldns_webhook_opnsense_lost_writes_total":         3,
+		"externaldns_webhook_opnsense_verify_reads_failed_total": 1,
 	}
 	for name, n := range want {
 		if children[name] != n {

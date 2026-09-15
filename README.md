@@ -238,6 +238,8 @@ Read, apply and reconfigure:
 - `externaldns_webhook_opnsense_lost_writes_total{provider,operation}` — writes
   the firewall acknowledged that the re-read after the phase showed were not
   saved; `operation` is `create`, `update` or `delete`
+- `externaldns_webhook_opnsense_verify_reads_failed_total{provider}` — verification
+  reads that failed, so that apply's writes went unverified
 
 Health of the whole loop:
 

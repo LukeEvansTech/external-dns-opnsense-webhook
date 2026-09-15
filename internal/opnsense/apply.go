@@ -444,6 +444,7 @@ func (p *Provider) verifyPhase(ctx context.Context, run *applyRun) int {
 	snap, err := p.client.Snapshot(ctx)
 	if err != nil {
 		slog.Error("post-phase verification read failed; lost writes cannot be detected this cycle", "writes", len(writes), "error", err)
+		metrics.Get().VerifyReadsFailedTotal.WithLabelValues(metrics.ProviderName).Inc()
 		return 0
 	}
 	byUUID := make(map[string]*hostRow, len(snap.rows))

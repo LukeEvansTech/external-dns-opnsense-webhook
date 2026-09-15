@@ -65,16 +65,17 @@ type Metrics struct {
 	PanicsTotal          *prometheus.CounterVec
 
 	// OPNsense provider metrics
-	PagesFetchedTotal     *prometheus.CounterVec
-	ReadRestartsTotal     *prometheus.CounterVec
-	RowsTotal             *prometheus.GaugeVec
-	ReconfigureTotal      *prometheus.CounterVec
-	PendingReconfigure    *prometheus.GaugeVec
-	ApplyDuration         *prometheus.HistogramVec
-	DeleteBlockedTotal    *prometheus.CounterVec
-	EndpointsDroppedTotal *prometheus.CounterVec
-	TXTInvalidTotal       *prometheus.CounterVec
-	LostWritesTotal       *prometheus.CounterVec
+	PagesFetchedTotal      *prometheus.CounterVec
+	ReadRestartsTotal      *prometheus.CounterVec
+	RowsTotal              *prometheus.GaugeVec
+	ReconfigureTotal       *prometheus.CounterVec
+	PendingReconfigure     *prometheus.GaugeVec
+	ApplyDuration          *prometheus.HistogramVec
+	DeleteBlockedTotal     *prometheus.CounterVec
+	EndpointsDroppedTotal  *prometheus.CounterVec
+	TXTInvalidTotal        *prometheus.CounterVec
+	LostWritesTotal        *prometheus.CounterVec
+	VerifyReadsFailedTotal *prometheus.CounterVec
 
 	// Quality metrics
 	ConsecutiveErrors    *prometheus.GaugeVec
@@ -346,6 +347,14 @@ func build(f promauto.Factory, version string) *Metrics {
 			},
 			[]string{labelProvider, labelOperation},
 		),
+		VerifyReadsFailedTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "opnsense_verify_reads_failed_total",
+				Help:      "Post-phase verification reads that failed, leaving that apply's writes unverified",
+			},
+			[]string{labelProvider},
+		),
 
 		ConsecutiveErrors: f.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -398,6 +407,7 @@ var DropReasons = []string{
 func (m *Metrics) preCreateChildren() {
 	m.DeleteBlockedTotal.WithLabelValues(ProviderName)
 	m.TXTInvalidTotal.WithLabelValues(ProviderName)
+	m.VerifyReadsFailedTotal.WithLabelValues(ProviderName)
 	m.PagesFetchedTotal.WithLabelValues(ProviderName)
 	m.ReadRestartsTotal.WithLabelValues(ProviderName)
 	for _, result := range []string{reconfigureOK, reconfigureError} {
