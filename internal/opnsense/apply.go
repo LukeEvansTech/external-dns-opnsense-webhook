@@ -50,6 +50,14 @@ const (
 // noGate marks a phase that runs unconditionally.
 const noGate = -1
 
+// Change operations: the operation label on the change and lost-write
+// counters, and the kind of a recorded write.
+const (
+	changeCreate = "create"
+	changeUpdate = "update"
+	changeDelete = "delete"
+)
+
 func isTXT(rr string) bool  { return rr == recordTypeTXT }
 func isData(rr string) bool { return rr != recordTypeTXT }
 
@@ -88,6 +96,7 @@ var applyPhases = [...]struct {
 type applyRun struct {
 	p    *Provider
 	snap *Snapshot
+	sets map[rowKey]*desiredSet
 
 	mu    sync.Mutex
 	errs  []error
@@ -95,6 +104,19 @@ type applyRun struct {
 	// phaseFailed counts converge failures within the phase now running; apply
 	// resets it before each phase and reads it once the phase has drained.
 	phaseFailed int
+	// writes lists every write the firewall acknowledged in the phase now
+	// running; verifyPhase takes and checks them once the phase has drained.
+	writes []writeRecord
+}
+
+// writeRecord is one acknowledged write and the state the table must show
+// for it once re-read: the row present and reading as want (create and
+// update), or absent (delete, where want is unused).
+type writeRecord struct {
+	op   string
+	key  rowKey
+	uuid string
+	want hostFields
 }
 
 // fail records a converge error and marks the key, so the remove phase knows
@@ -115,6 +137,17 @@ func (r *applyRun) markFailed(set *desiredSet) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(set.targets) > 0 {
+		set.failed = true
+	}
+}
+
+// lost records a write the re-read did not show and marks its key failed, so
+// the later phases treat the key exactly as they would after a rejected write.
+func (r *applyRun) lost(set *desiredSet, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.errs = append(r.errs, err)
+	if set != nil {
 		set.failed = true
 	}
 }
@@ -146,6 +179,22 @@ func (r *applyRun) addErr(err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.errs = append(r.errs, err)
+}
+
+// record logs a write the firewall acknowledged, for verifyPhase.
+func (r *applyRun) record(op string, k rowKey, uuid string, want hostFields) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.writes = append(r.writes, writeRecord{op: op, key: k, uuid: uuid, want: want})
+}
+
+// takeWrites hands back the phase's acknowledged writes and clears the log.
+func (r *applyRun) takeWrites() []writeRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w := r.writes
+	r.writes = nil
+	return w
 }
 
 // err joins everything collected during the run.
@@ -310,7 +359,7 @@ func (p *Provider) apply(ctx context.Context, changes *plan.Changes) error {
 		return err
 	}
 	sets, errs, rejectedTXT := p.foldChanges(changes)
-	run := &applyRun{p: p, snap: snap, errs: errs}
+	run := &applyRun{p: p, snap: snap, sets: sets, errs: errs}
 
 	keys := make([]rowKey, 0, len(sets))
 	for k := range sets {
@@ -356,6 +405,9 @@ func (p *Provider) apply(ctx context.Context, changes *plan.Changes) error {
 		// others, and the errors are collected rather than propagated.
 		_ = g.Wait()
 		failures[i] += run.endPhase()
+		// A write the firewall acknowledged but did not keep counts against
+		// this phase like a rejected one, so the same gate protects the next.
+		failures[i] += p.verifyPhase(ctx, run)
 	}
 
 	// A write attempt, committed or not, means saved and served may differ; so
@@ -367,6 +419,78 @@ func (p *Provider) apply(ctx context.Context, changes *plan.Changes) error {
 		}
 	}
 	return run.err()
+}
+
+// verifyPhase re-reads the table after a phase that wrote and checks every
+// acknowledged write is really there: a created or updated row exists and
+// reads as written, a deleted row is gone. OPNsense has answered "saved" for
+// rows that never reached the config, so an acknowledgement alone is not
+// proof the write landed. Each lost write is logged, counted, and recorded
+// against its key as a failure, which is what lets the phase gate and the
+// remove phases treat it like a rejected write; the rows that did land are
+// still reconfigured. The read is a safety net, not a gate: if it fails, that
+// is logged and the apply carries on.
+//
+// A present row is compared on exactly the fields addSet compares when it
+// decides a row needs no write, so a row this accepts is one the next apply
+// would leave alone.
+//
+// It returns how many writes were lost.
+func (p *Provider) verifyPhase(ctx context.Context, run *applyRun) int {
+	writes := run.takeWrites()
+	if len(writes) == 0 {
+		return 0
+	}
+	snap, err := p.client.Snapshot(ctx)
+	if err != nil {
+		slog.Error("post-phase verification read failed; lost writes cannot be detected this cycle", "writes", len(writes), "error", err)
+		return 0
+	}
+	byUUID := make(map[string]*hostRow, len(snap.rows))
+	for _, r := range snap.rows {
+		byUUID[r.UUID] = r
+	}
+	lost := 0
+	for _, w := range writes {
+		row, present := byUUID[w.uuid]
+		var problem string
+		switch {
+		case w.op == changeDelete:
+			if present {
+				problem = "row still present"
+			}
+		case !present:
+			problem = "row missing"
+		default:
+			problem = row.differsFrom(w.want)
+		}
+		if problem == "" {
+			continue
+		}
+		lost++
+		metrics.Get().LostWritesTotal.WithLabelValues(metrics.ProviderName, w.op).Inc()
+		slog.Error("write acknowledged by OPNsense but not saved", "operation", w.op, "name", w.key.name, "type", w.key.rr, "uuid", w.uuid, "problem", problem)
+		run.lost(run.sets[w.key], fmt.Errorf("%s %s %s (%s): %w: %s", w.op, w.key.rr, w.key.name, w.uuid, ErrLostWrite, problem))
+	}
+	return lost
+}
+
+// differsFrom reports the first way the row does not read as the write want
+// described it, or "" when it does.
+func (r *hostRow) differsFrom(want hostFields) string {
+	switch {
+	case joinName(r.Hostname, r.Domain) != joinName(want.Hostname, want.Domain) || r.RR != want.RR:
+		return fmt.Sprintf("row reads %s %s", r.RR, joinName(r.Hostname, r.Domain))
+	case r.bareTarget() != want.target():
+		return fmt.Sprintf("target reads %q", r.bareTarget())
+	case r.ttlValue() != parseTTL(want.TTL):
+		return fmt.Sprintf("ttl reads %q", r.TTL)
+	case r.Description != want.Description:
+		return fmt.Sprintf("description reads %q", r.Description)
+	case r.AddPTR != want.AddPTR:
+		return fmt.Sprintf("addptr reads %q", r.AddPTR)
+	}
+	return ""
 }
 
 // converge brings one key's rows towards its desired set in the given mode.
@@ -466,8 +590,9 @@ func (p *Provider) removeSurplus(ctx context.Context, run *applyRun, set *desire
 			return fmt.Errorf("delete %s %s (%s): %w", set.key.rr, set.key.name, r.UUID, err)
 		}
 		run.removeRow(set.key, r.UUID)
+		run.record(changeDelete, set.key, r.UUID, hostFields{})
 		if deleted {
-			metrics.Get().RecordChange("delete", set.key.rr)
+			metrics.Get().RecordChange(changeDelete, set.key.rr)
 			slog.Info("deleted override", "name", set.key.name, "type", set.key.rr, "target", r.bareTarget(), "uuid", r.UUID)
 			continue
 		}
@@ -483,7 +608,8 @@ func (p *Provider) setRow(ctx context.Context, run *applyRun, k rowKey, r *hostR
 		return fmt.Errorf("set %s %s -> %s (%s): %w", k.rr, k.name, target, r.UUID, err)
 	}
 	run.retarget(k, r, f)
-	metrics.Get().RecordChange("update", k.rr)
+	run.record(changeUpdate, k, r.UUID, f)
+	metrics.Get().RecordChange(changeUpdate, k.rr)
 	slog.Info("updated override", "name", k.name, "type", k.rr, "target", target, "uuid", r.UUID)
 	return nil
 }
@@ -499,7 +625,8 @@ func (p *Provider) createRow(ctx context.Context, run *applyRun, k rowKey, f hos
 		UUID: id, Enabled: f.Enabled, Hostname: f.Hostname, Domain: f.Domain, RR: f.RR,
 		Server: f.Server, TXTData: f.TXTData, TTL: f.TTL, AddPTR: f.AddPTR, Description: f.Description,
 	})
-	metrics.Get().RecordChange("create", k.rr)
+	run.record(changeCreate, k, id, f)
+	metrics.Get().RecordChange(changeCreate, k.rr)
 	slog.Info("created override", "name", k.name, "type", k.rr, "target", target, "uuid", id)
 	return nil
 }

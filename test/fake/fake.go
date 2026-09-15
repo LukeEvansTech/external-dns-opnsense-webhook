@@ -35,9 +35,12 @@ const (
 // spelled the same as OpStatus by coincidence — OpStatus names the operation
 // for hit counters and faults, keyStatus names the response field.
 const (
-	keyResult    = "result"
-	resultFailed = "failed"
-	keyStatus    = "status"
+	keyResult     = "result"
+	keyUUID       = "uuid"
+	resultFailed  = "failed"
+	resultSaved   = "saved"
+	resultDeleted = "deleted"
+	keyStatus     = "status"
 )
 
 // Row is a host override in the config table.
@@ -68,8 +71,12 @@ type Alias struct {
 
 // Fault makes the next Times calls to Op answer Status. With AfterCommit the
 // write is applied first, simulating a committed write whose response is lost.
-// SkipCalls lets that many calls to Op through before the fault fires, so a
-// test can target the Nth call of a phase-ordered apply.
+// With Lost the write is acknowledged as if it had succeeded ("saved" with a
+// fresh uuid, "saved", or "deleted") but the table is left untouched: the
+// firewall's load-modify-save race seen from the client. Lost applies to the
+// three write operations only and takes precedence over Status and
+// AfterCommit. SkipCalls lets that many calls to Op through before the fault
+// fires, so a test can target the Nth call of a phase-ordered apply.
 //
 // A fault fires only on a call that would otherwise succeed; an invalid
 // payload or unknown uuid answers normally and leaves the fault armed.
@@ -78,6 +85,7 @@ type Fault struct {
 	Status      int
 	Times       int
 	AfterCommit bool
+	Lost        bool
 	SkipCalls   int
 }
 
@@ -100,6 +108,13 @@ type Server struct {
 	hits         map[string]int
 	reconfigures int
 	srv          *httptest.Server
+
+	// flightMu guards the write concurrency counters. It is separate from mu
+	// because a write handler counts itself in before it takes mu, which is
+	// the only way overlapping requests can be observed at all.
+	flightMu          sync.Mutex
+	writesInFlight    int
+	maxWritesInFlight int
 }
 
 // New starts a fake bound to the test's lifetime.
@@ -184,6 +199,29 @@ func (s *Server) Reconfigures() int {
 	return s.reconfigures
 }
 
+// MaxInFlightWrites is the largest number of add, set and delete requests
+// that were ever inside their handlers at the same time.
+func (s *Server) MaxInFlightWrites() int {
+	s.flightMu.Lock()
+	defer s.flightMu.Unlock()
+	return s.maxWritesInFlight
+}
+
+// enterWrite counts a write request in; the returned func counts it out.
+func (s *Server) enterWrite() func() {
+	s.flightMu.Lock()
+	s.writesInFlight++
+	if s.writesInFlight > s.maxWritesInFlight {
+		s.maxWritesInFlight = s.writesInFlight
+	}
+	s.flightMu.Unlock()
+	return func() {
+		s.flightMu.Lock()
+		s.writesInFlight--
+		s.flightMu.Unlock()
+	}
+}
+
 // Hits counts calls to an operation, faults included.
 func (s *Server) Hits(op string) int {
 	s.mu.Lock()
@@ -247,7 +285,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 // rowJSON renders a row in the search/get shape, children included.
 func (s *Server) rowJSON(r *Row, withChildren bool) map[string]any {
 	m := map[string]any{
-		"uuid": r.UUID, "enabled": r.Enabled, "hostname": r.Hostname, "domain": r.Domain,
+		keyUUID: r.UUID, "enabled": r.Enabled, "hostname": r.Hostname, "domain": r.Domain,
 		"rr": r.RR, "server": r.Server, "txtdata": r.TXTData, "mx": r.MX, "mxprio": r.MXPrio,
 		"ttl": r.TTL, "addptr": r.AddPTR, "description": r.Description, "isAlias": false,
 	}
@@ -262,7 +300,7 @@ func (s *Server) rowJSON(r *Row, withChildren bool) map[string]any {
 		for k, v := range m {
 			c[k] = v
 		}
-		c["uuid"], c["isAlias"] = a.UUID, true
+		c[keyUUID], c["isAlias"] = a.UUID, true
 		c["enabled"], c["hostname"], c["domain"], c["description"] = a.Enabled, a.Hostname, a.Domain, a.Description
 		if m["_children"] == nil {
 			m["_children"] = []map[string]any{}
@@ -428,6 +466,7 @@ func validate(h map[string]string) map[string]string {
 }
 
 func (s *Server) handleAdd(w http.ResponseWriter, r *http.Request) {
+	defer s.enterWrite()()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.hits[OpAddHostOverride]++
@@ -441,6 +480,10 @@ func (s *Server) handleAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f := s.takeFault(OpAddHostOverride)
+	if f != nil && f.Lost {
+		writeJSON(w, map[string]any{keyResult: resultSaved, keyUUID: uuid.NewString()})
+		return
+	}
 	if f != nil && !f.AfterCommit {
 		http.Error(w, "injected", f.Status)
 		return
@@ -457,7 +500,7 @@ func (s *Server) handleAdd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "injected after commit", f.Status)
 		return
 	}
-	writeJSON(w, map[string]any{keyResult: "saved", "uuid": row.UUID})
+	writeJSON(w, map[string]any{keyResult: resultSaved, keyUUID: row.UUID})
 }
 
 func orDefault(v, d string) string {
@@ -468,6 +511,7 @@ func orDefault(v, d string) string {
 }
 
 func (s *Server) handleSet(w http.ResponseWriter, r *http.Request) {
+	defer s.enterWrite()()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.hits[OpSet]++
@@ -486,6 +530,10 @@ func (s *Server) handleSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f := s.takeFault(OpSet)
+	if f != nil && f.Lost {
+		writeJSON(w, map[string]any{keyResult: resultSaved})
+		return
+	}
 	if f != nil && !f.AfterCommit {
 		http.Error(w, "injected", f.Status)
 		return
@@ -498,10 +546,11 @@ func (s *Server) handleSet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "injected after commit", f.Status)
 		return
 	}
-	writeJSON(w, map[string]any{keyResult: "saved"})
+	writeJSON(w, map[string]any{keyResult: resultSaved})
 }
 
 func (s *Server) handleDel(w http.ResponseWriter, r *http.Request) {
+	defer s.enterWrite()()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.hits[OpDel]++
@@ -512,6 +561,10 @@ func (s *Server) handleDel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f := s.takeFault(OpDel)
+	if f != nil && f.Lost {
+		writeJSON(w, map[string]any{keyResult: resultDeleted})
+		return
+	}
 	if f != nil && !f.AfterCommit {
 		http.Error(w, "injected", f.Status)
 		return
@@ -528,7 +581,7 @@ func (s *Server) handleDel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "injected after commit", f.Status)
 		return
 	}
-	writeJSON(w, map[string]any{keyResult: "deleted"})
+	writeJSON(w, map[string]any{keyResult: resultDeleted})
 }
 
 func (s *Server) handleReconfigure(w http.ResponseWriter, r *http.Request) {

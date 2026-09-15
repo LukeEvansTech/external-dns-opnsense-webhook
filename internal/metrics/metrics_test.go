@@ -143,6 +143,7 @@ func TestBuild_RegistersOPNsenseMetrics(t *testing.T) {
 		"externaldns_webhook_opnsense_delete_blocked_total",
 		"externaldns_webhook_opnsense_endpoints_dropped_total",
 		"externaldns_webhook_opnsense_txt_invalid_total",
+		"externaldns_webhook_opnsense_lost_writes_total",
 	} {
 		if !got[want] {
 			t.Errorf("metric %s not registered", want)
@@ -227,6 +228,7 @@ func TestBuild_PreCreatesClosedSetChildren(t *testing.T) {
 		"externaldns_webhook_opnsense_reconfigure_total":       2,
 		"externaldns_webhook_opnsense_endpoints_dropped_total": len(DropReasons),
 		"externaldns_webhook_changes_total":                    3,
+		"externaldns_webhook_opnsense_lost_writes_total":       3,
 	}
 	for name, n := range want {
 		if children[name] != n {

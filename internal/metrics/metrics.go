@@ -74,6 +74,7 @@ type Metrics struct {
 	DeleteBlockedTotal    *prometheus.CounterVec
 	EndpointsDroppedTotal *prometheus.CounterVec
 	TXTInvalidTotal       *prometheus.CounterVec
+	LostWritesTotal       *prometheus.CounterVec
 
 	// Quality metrics
 	ConsecutiveErrors    *prometheus.GaugeVec
@@ -337,6 +338,14 @@ func build(f promauto.Factory, version string) *Metrics {
 			},
 			[]string{labelProvider},
 		),
+		LostWritesTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "opnsense_lost_writes_total",
+				Help:      "Writes OPNsense acknowledged that a re-read of the table showed were not saved, by operation",
+			},
+			[]string{labelProvider, labelOperation},
+		),
 
 		ConsecutiveErrors: f.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -399,6 +408,7 @@ func (m *Metrics) preCreateChildren() {
 	}
 	for _, op := range []string{"create", "update", "delete"} {
 		m.ChangesTotal.WithLabelValues(ProviderName, op)
+		m.LostWritesTotal.WithLabelValues(ProviderName, op)
 	}
 }
 

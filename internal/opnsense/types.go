@@ -46,7 +46,7 @@ type Config struct {
 	OwnerMarker        string        `env:"OPNSENSE_OWNER_MARKER"                envDefault:"external-dns"`
 	PageSize           int           `env:"OPNSENSE_PAGE_SIZE"                   envDefault:"150"`
 	ReadAttempts       int           `env:"OPNSENSE_READ_ATTEMPTS"               envDefault:"3"`
-	ApplyWorkers       int           `env:"OPNSENSE_APPLY_WORKERS"               envDefault:"4"`
+	ApplyWorkers       int           `env:"OPNSENSE_APPLY_WORKERS"               envDefault:"1"`
 	RetryAttempts      int           `env:"OPNSENSE_RETRY_ATTEMPTS"              envDefault:"3"`
 	RetryInitialDelay  time.Duration `env:"OPNSENSE_RETRY_INITIAL_DELAY"         envDefault:"500ms"`
 	RetryMaxDelay      time.Duration `env:"OPNSENSE_RETRY_MAX_DELAY"             envDefault:"10s"`

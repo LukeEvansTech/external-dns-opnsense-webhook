@@ -80,7 +80,7 @@ func TestConfig_DefaultsFromEnv(t *testing.T) {
 	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if c.PageSize != 150 || c.ApplyWorkers != 4 || c.ReadAttempts != 3 || c.AddPTR || c.SkipTLSVerify {
+	if c.PageSize != 150 || c.ApplyWorkers != 1 || c.ReadAttempts != 3 || c.AddPTR || c.SkipTLSVerify {
 		t.Errorf("defaults wrong: %+v", c)
 	}
 	if c.RequestTimeout != 20*time.Second || c.ReconfigureTimeout != 45*time.Second || c.ApplyTimeout != 120*time.Second {

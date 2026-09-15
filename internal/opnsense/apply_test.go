@@ -27,6 +27,21 @@ func gaugeValue(t *testing.T, g prometheus.Gauge) float64 {
 	return m.GetGauge().GetValue()
 }
 
+func counterValue(t *testing.T, c prometheus.Counter) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := c.Write(&m); err != nil {
+		t.Fatalf("counter.Write: %v", err)
+	}
+	return m.GetCounter().GetValue()
+}
+
+// lostWrites reads the lost-writes counter for one operation.
+func lostWrites(t *testing.T, op string) float64 {
+	t.Helper()
+	return counterValue(t, metrics.Get().LostWritesTotal.WithLabelValues(metrics.ProviderName, op))
+}
+
 const label = `"heritage=external-dns,external-dns/owner=main,external-dns/resource=gateway-httproute/network/app"`
 
 func testProvider(t *testing.T, f *fake.Server) *Provider {
@@ -578,5 +593,219 @@ func TestApply_WorkersOneAndFourConverge(t *testing.T) {
 	}
 	if one.final != 0 || four.final != 0 {
 		t.Errorf("rows left after delete: 1=%d 4=%d", one.final, four.final)
+	}
+}
+
+// TestApply_LostWritesAreDetected is the safety net under the write path:
+// OPNsense acknowledges a write and the re-read after the phase shows it never
+// landed, the firewall's own failure mode from the 2026-09-15 cutover. Each
+// case checks the lost write is reported by name with ErrLostWrite, counted
+// under its operation, that the phase gate held for the phases after it, that
+// the rows which did land were still reconfigured, and that the next apply
+// with the same plan converges without a manual step.
+func TestApply_LostWritesAreDetected(t *testing.T) {
+	seedPair := func(f *fake.Server) {
+		f.AddRow(fake.Row{Hostname: "app", Domain: "example.com", RR: "A", Server: "192.0.2.1", Description: "external-dns", AddPTR: "0"})
+		f.AddRow(fake.Row{Hostname: "k8s.main.a-app", Domain: "example.com", RR: "TXT", TXTData: stripTXTQuotes(label), Description: "external-dns", AddPTR: "0"})
+	}
+	cases := []struct {
+		name    string
+		op      string
+		seed    func(f *fake.Server)
+		changes *plan.Changes
+		fault   fake.Fault
+		wantErr string
+		// afterFirst asserts the table and call counts once the lost write
+		// has been reported; afterSecond asserts the converged table.
+		afterFirst  func(t *testing.T, f *fake.Server)
+		afterSecond func(t *testing.T, f *fake.Server)
+	}{
+		{
+			// The TXT add is the first add call. Losing it must gate the data
+			// phase: an A row created now would have nothing claiming it, and
+			// external-dns never touches a row it does not own, so the name
+			// would stay unowned for good.
+			name: "TXT create",
+			op:   changeCreate,
+			changes: &plan.Changes{Create: []*endpoint.Endpoint{
+				ep("app.example.com", "A", 0, "192.0.2.1"),
+				ep("k8s.main.a-app.example.com", "TXT", 0, label),
+			}},
+			fault:   fake.Fault{Op: fake.OpAddHostOverride, Lost: true, Times: 1},
+			wantErr: "create TXT k8s.main.a-app.example.com",
+			afterFirst: func(t *testing.T, f *fake.Server) {
+				if a, txt := rowsByKind(f); len(a) != 0 || len(txt) != 0 {
+					t.Errorf("A=%d TXT=%d; want the data create gated on the lost TXT", len(a), len(txt))
+				}
+				if f.Hits(fake.OpAddHostOverride) != 1 {
+					t.Errorf("add calls = %d, want 1: the data phase must not have run", f.Hits(fake.OpAddHostOverride))
+				}
+			},
+			afterSecond: func(t *testing.T, f *fake.Server) {
+				if a, txt := rowsByKind(f); len(a) != 1 || len(txt) != 1 {
+					t.Errorf("A=%d TXT=%d; want both converged", len(a), len(txt))
+				}
+			},
+		},
+		{
+			name: "A update",
+			op:   changeUpdate,
+			seed: seedPair,
+			changes: &plan.Changes{
+				UpdateOld: []*endpoint.Endpoint{ep("app.example.com", "A", 0, "192.0.2.1")},
+				UpdateNew: []*endpoint.Endpoint{ep("app.example.com", "A", 300, "192.0.2.1")},
+			},
+			fault:   fake.Fault{Op: fake.OpSet, Lost: true, Times: 1},
+			wantErr: "update A app.example.com",
+			afterFirst: func(t *testing.T, f *fake.Server) {
+				a, _ := rowsByKind(f)
+				if len(a) != 1 || a[0].TTL != "" {
+					t.Errorf("rows = %+v; want the row as it was", a)
+				}
+			},
+			afterSecond: func(t *testing.T, f *fake.Server) {
+				if a, _ := rowsByKind(f); len(a) != 1 || a[0].TTL != "300" {
+					t.Errorf("rows = %+v; want ttl 300", a)
+				}
+			},
+		},
+		{
+			// The A delete is the first del call. Losing it must gate the TXT
+			// remove phase, so the registry row survives and the next plan
+			// still sees an owned A to delete.
+			name: "A delete",
+			op:   changeDelete,
+			seed: seedPair,
+			changes: &plan.Changes{Delete: []*endpoint.Endpoint{
+				ep("k8s.main.a-app.example.com", "TXT", 0, label),
+				ep("app.example.com", "A", 0, "192.0.2.1"),
+			}},
+			fault:   fake.Fault{Op: fake.OpDel, Lost: true, Times: 1},
+			wantErr: "delete A app.example.com",
+			afterFirst: func(t *testing.T, f *fake.Server) {
+				if a, txt := rowsByKind(f); len(a) != 1 || len(txt) != 1 {
+					t.Errorf("A=%d TXT=%d; want both rows kept", len(a), len(txt))
+				}
+				if f.Hits(fake.OpDel) != 1 {
+					t.Errorf("del calls = %d, want 1: the TXT phase must not have run", f.Hits(fake.OpDel))
+				}
+			},
+			afterSecond: func(t *testing.T, f *fake.Server) {
+				if n := len(f.Rows()); n != 0 {
+					t.Errorf("rows = %d after the second apply, want 0", n)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := fake.New(t)
+			if tc.seed != nil {
+				tc.seed(f)
+			}
+			p := testProvider(t, f)
+			before := lostWrites(t, tc.op)
+			f.Inject(tc.fault)
+
+			err := p.ApplyChanges(context.Background(), tc.changes)
+			if !errors.Is(err, ErrLostWrite) {
+				t.Fatalf("err = %v, want ErrLostWrite", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("err = %v; want the lost write named as %q", err, tc.wantErr)
+			}
+			if got := lostWrites(t, tc.op) - before; got != 1 {
+				t.Errorf("lost_writes_total{%s} rose by %v, want 1", tc.op, got)
+			}
+			// The rows that did land must be served: a lost write never
+			// withholds the reload.
+			if f.Reconfigures() != 1 {
+				t.Errorf("reconfigures = %d, want 1", f.Reconfigures())
+			}
+			tc.afterFirst(t, f)
+
+			if err := p.ApplyChanges(context.Background(), tc.changes); err != nil {
+				t.Fatalf("second apply: %v", err)
+			}
+			tc.afterSecond(t, f)
+			if got := lostWrites(t, tc.op) - before; got != 1 {
+				t.Errorf("lost_writes_total{%s} rose by %v after a clean apply, want 1", tc.op, got)
+			}
+		})
+	}
+}
+
+// TestApply_VerificationReadsOncePerWritingPhase pins the cost of the safety
+// net: one paginated read after each phase that wrote, none after a phase
+// that did not, and none at all for an apply that wrote nothing. The table
+// stays within one page, so every read is exactly one search call.
+func TestApply_VerificationReadsOncePerWritingPhase(t *testing.T) {
+	f := fake.New(t)
+	p := testProvider(t, f)
+	before := map[string]float64{}
+	for _, op := range []string{changeCreate, changeUpdate, changeDelete} {
+		before[op] = lostWrites(t, op)
+	}
+	pair := &plan.Changes{Create: []*endpoint.Endpoint{
+		ep("app.example.com", "A", 0, "192.0.2.1"),
+		ep("k8s.main.a-app.example.com", "TXT", 0, label),
+	}}
+	steps := []struct {
+		name    string
+		changes *plan.Changes
+		// searches is the number of search calls the step adds: the snapshot
+		// the apply starts from, plus one per phase that wrote.
+		searches int
+	}{
+		{"create A and TXT: TXT and data phases write", pair, 3},
+		{"same plan again: nothing writes", pair, 1},
+		{"TXT only: one phase writes", &plan.Changes{Create: []*endpoint.Endpoint{
+			ep("k8s.main.a-other.example.com", "TXT", 0, label)}}, 2},
+		{"delete both: data and TXT remove phases write", &plan.Changes{Delete: pair.Create}, 3},
+	}
+	for _, st := range steps {
+		start := f.Hits(fake.OpSearch)
+		if err := p.ApplyChanges(context.Background(), st.changes); err != nil {
+			t.Fatalf("%s: %v", st.name, err)
+		}
+		if got := f.Hits(fake.OpSearch) - start; got != st.searches {
+			t.Errorf("%s: %d searches, want %d", st.name, got, st.searches)
+		}
+	}
+	for op, was := range before {
+		if got := lostWrites(t, op); got != was {
+			t.Errorf("lost_writes_total{%s} = %v, want %v: nothing was lost", op, got, was)
+		}
+	}
+}
+
+// TestApply_WritesAreSerialised holds the client's write lock: however many
+// workers fan out across names, OPNsense never sees two mutating calls at
+// once, because its config save is not safe under them.
+func TestApply_WritesAreSerialised(t *testing.T) {
+	const keys = 32
+	f := fake.New(t)
+	p := testProvider(t, f)
+	p.cfg.ApplyWorkers = 8
+	eps := make([]*endpoint.Endpoint, 0, 2*keys)
+	for i := range keys {
+		eps = append(eps,
+			ep(fmt.Sprintf("app%d.example.com", i), "A", 300, fmt.Sprintf("192.0.2.%d", i+1)),
+			ep(fmt.Sprintf("k8s.main.a-app%d.example.com", i), "TXT", 0, fmt.Sprintf(`"owner=main,n=%d"`, i)))
+	}
+	if err := p.ApplyChanges(context.Background(), &plan.Changes{Create: eps}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if n := len(f.Rows()); n != 2*keys {
+		t.Fatalf("rows = %d, want %d", n, 2*keys)
+	}
+	if err := p.ApplyChanges(context.Background(), &plan.Changes{Delete: eps}); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if got := f.MaxInFlightWrites(); got != 1 {
+		t.Errorf("max in-flight writes = %d with %d workers, want 1", got, p.cfg.ApplyWorkers)
+	}
+	if f.Hits(fake.OpAddHostOverride) != 2*keys || f.Hits(fake.OpDel) != 2*keys {
+		t.Errorf("add=%d del=%d, want %d each", f.Hits(fake.OpAddHostOverride), f.Hits(fake.OpDel), 2*keys)
 	}
 }

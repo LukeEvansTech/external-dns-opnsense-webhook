@@ -143,11 +143,15 @@ func (r *hostRow) UnmarshalJSON(data []byte) error {
 func (r hostRow) enabled() bool { return r.Enabled != "0" && r.Enabled != "" }
 
 // ttlValue returns the row's TTL or 0 when unset.
-func (r hostRow) ttlValue() int64 {
-	if r.TTL == "" {
+func (r hostRow) ttlValue() int64 { return parseTTL(r.TTL) }
+
+// parseTTL reads a ttl field as the model stores it: empty, unparsable and
+// negative all mean unset.
+func parseTTL(s string) int64 {
+	if s == "" {
 		return 0
 	}
-	n, err := strconv.ParseInt(r.TTL, 10, 64)
+	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil || n < 0 {
 		return 0
 	}
@@ -197,6 +201,14 @@ type hostFields struct {
 	TTL         string `json:"ttl"`
 	AddPTR      string `json:"addptr"`
 	Description string `json:"description"`
+}
+
+// target is the value the write carries: txtdata for TXT, server otherwise.
+func (f hostFields) target() string {
+	if f.RR == recordTypeTXT {
+		return f.TXTData
+	}
+	return f.Server
 }
 
 type hostPayload struct {
