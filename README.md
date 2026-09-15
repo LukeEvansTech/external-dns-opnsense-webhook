@@ -30,7 +30,7 @@ provider:
   webhook:
     image:
       repository: ghcr.io/lukeevanstech/external-dns-opnsense-webhook
-      tag: 0.1.0 # pin a release
+      tag: 0.1.1 # pin a release
     env:
       - name: OPNSENSE_HOST
         value: https://fw.example.com
