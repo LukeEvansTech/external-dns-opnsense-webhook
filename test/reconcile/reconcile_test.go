@@ -291,10 +291,9 @@ func TestReconcile_Faults(t *testing.T) {
 		// wantTXTRows is how many registry rows for appName the converged
 		// config table must hold. It is stated per case rather than derived
 		// from after, because one fault leaves an orphan the controller
-		// cannot reach (see the note on the delete case). Every case here
-		// expects exactly one, so the served-table check below is a plain
-		// "the registry row is published"; a case that legitimately expected
-		// zero would need that check rewritten as well.
+		// cannot reach (see the note on the delete case), and the served
+		// table is checked against it: the registry row is published exactly
+		// when the config table holds it.
 		wantTXTRows int
 		// minReconfigures is the floor on successful publishes, counting the
 		// one seed does. It matters most in the reconfigure case, where the
@@ -358,6 +357,56 @@ func TestReconcile_Faults(t *testing.T) {
 			wantTXTRows:     1,
 			minReconfigures: 2,
 		},
+		{
+			// The firewall's own failure mode from the 2026-09-15 cutover: the
+			// add is acknowledged with a uuid and the row is never saved. The
+			// TXT add is the first add call. The re-read after the TXT phase
+			// catches it and gates the data phase, so the next reconcile finds
+			// the name untaken and creates both rows. Without that gate the A
+			// row would exist with no registry row, and the planner, which
+			// only ever updates or deletes records it owns and never re-creates
+			// a name that is taken, would leave it unowned for good.
+			name: "TXT add acknowledged but not saved",
+			op:   fake.OpAddHostOverride,
+			arm: func(f *fake.Server) {
+				f.Inject(fake.Fault{Op: fake.OpAddHostOverride, Lost: true, Times: 1})
+			},
+			after:           []*endpoint.Endpoint{a(appName, 0, "192.0.2.1")},
+			wantTXTRows:     1,
+			minReconfigures: 2,
+		},
+		{
+			name: "A add acknowledged but not saved",
+			op:   fake.OpAddHostOverride,
+			arm: func(f *fake.Server) {
+				f.Inject(fake.Fault{Op: fake.OpAddHostOverride, Lost: true, Times: 1, SkipCalls: 1})
+			},
+			after:           []*endpoint.Endpoint{a(appName, 0, "192.0.2.1")},
+			wantTXTRows:     1,
+			minReconfigures: 2,
+		},
+		{
+			name:            "update acknowledged but not applied",
+			op:              fake.OpSet,
+			arm:             func(f *fake.Server) { f.Inject(fake.Fault{Op: fake.OpSet, Lost: true, Times: 1}) },
+			before:          []*endpoint.Endpoint{a(appName, 0, "192.0.2.1")},
+			after:           []*endpoint.Endpoint{a(appName, 600, "192.0.2.1")},
+			wantTXTRows:     1,
+			minReconfigures: 2,
+		},
+		{
+			// The A delete is the first del call. The re-read after the data
+			// remove phase catches the lost delete and gates the TXT remove
+			// phase, so the registry row survives to the next reconcile, which
+			// still sees an owned A and removes both rows.
+			name:            "A delete acknowledged but not saved",
+			op:              fake.OpDel,
+			arm:             func(f *fake.Server) { f.Inject(fake.Fault{Op: fake.OpDel, Lost: true, Times: 1}) },
+			before:          []*endpoint.Endpoint{a(appName, 0, "192.0.2.1")},
+			after:           nil,
+			wantTXTRows:     0,
+			minReconfigures: 2,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -401,8 +450,8 @@ func TestReconcile_Faults(t *testing.T) {
 			if tc.after == nil && servedHas(h.fake, appName, "A", "192.0.2.1") {
 				t.Errorf("deleted data row still served: %+v", h.fake.Served())
 			}
-			if !txtServed(h.fake, appTXTName) {
-				t.Errorf("registry TXT not served: %+v", h.fake.Served())
+			if served := txtServed(h.fake, appTXTName); served != (tc.wantTXTRows > 0) {
+				t.Errorf("registry TXT served = %v, want %v: %+v", served, tc.wantTXTRows > 0, h.fake.Served())
 			}
 
 			// Config table: no duplicate registry rows from a retried write.
