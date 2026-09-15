@@ -258,8 +258,8 @@ Algorithm:
   After each phase that wrote, the provider re-reads the table (the same
   consistent paginated read as 6.1, one read per writing phase) and checks
   every acknowledged write: a created or updated row is present and reads as
-  written on the fields the converge compares (name, type, target, ttl,
-  description, addptr), a deleted row is gone. A write the firewall
+  written on the fields the converge compares (name, type, target, `ttl`,
+  `description`, `addptr`), a deleted row is gone. A write the firewall
   acknowledged but did not keep is logged at error with name, type and uuid,
   counted in `externaldns_webhook_opnsense_lost_writes_total{operation}`, and
   recorded as that phase's failure, so the gate above holds for the phases
