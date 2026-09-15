@@ -248,12 +248,13 @@ func TestApply_NoWritesNoReconfigure(t *testing.T) {
 	}
 }
 
-// TestApply_InvalidTXTFailsThatEndpointOnly holds invariant I1 for a registry
-// TXT the fold rejected rather than one whose write failed. The row is equally
-// absent either way, so the A row it would have claimed is not created on this
-// cycle; nothing is written at all, so no reconfigure follows; and the next
-// plan carrying a valid TXT converges both rows.
-func TestApply_InvalidTXTFailsThatEndpointOnly(t *testing.T) {
+// TestApply_InvalidTXTBlocksItsDataCreates holds invariant I1 for a registry
+// TXT the fold rejected rather than one whose write failed: an invalid TXT
+// blocks the A row it would have claimed, not just its own write. The row is
+// equally absent either way, so nothing is written at all on this cycle, no
+// reconfigure follows; and the next plan carrying a valid TXT converges both
+// rows.
+func TestApply_InvalidTXTBlocksItsDataCreates(t *testing.T) {
 	f := fake.New(t)
 	p := testProvider(t, f)
 	err := p.ApplyChanges(context.Background(), &plan.Changes{Create: []*endpoint.Endpoint{
