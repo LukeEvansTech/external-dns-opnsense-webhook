@@ -71,7 +71,7 @@ var applyPhases = [...]struct {
 	skip    string
 }{
 	phaseTXTAdd:     {isTXT, modeAddSet, noGate, ""},
-	phaseDataAdd:    {isData, modeAddSet, phaseTXTAdd, "skipping data creates: TXT writes failed this cycle"},
+	phaseDataAdd:    {isData, modeAddSet, phaseTXTAdd, "skipping data creates: TXT writes failed or were rejected this cycle"},
 	phaseDataRemove: {isData, modeRemove, noGate, ""},
 	phaseTXTRemove:  {isTXT, modeRemove, phaseDataRemove, "skipping TXT removes: data deletes failed this cycle"},
 }
