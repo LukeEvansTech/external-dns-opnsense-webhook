@@ -25,6 +25,9 @@ var (
 	ErrWildcard = errors.New("opnsense: wildcard overrides are not written in v1")
 	// ErrUnsupportedType is returned for a record type the provider cannot write.
 	ErrUnsupportedType = errors.New("opnsense: unsupported record type")
+	// ErrLostWrite is returned when the firewall acknowledged a write that a
+	// re-read of the table shows was not saved.
+	ErrLostWrite = errors.New("opnsense: write acknowledged but not saved")
 )
 
 // NetworkError wraps a transport failure.

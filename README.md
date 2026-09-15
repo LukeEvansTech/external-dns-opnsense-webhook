@@ -104,7 +104,7 @@ bad value exits non-zero before either listener is bound.
 | `OPNSENSE_OWNER_MARKER`                                                                               | `external-dns`                 | Written into `description` on every managed row, for operators filtering the grid and for the startup served-state check. Never used for ownership decisions.                                                              |
 | `OPNSENSE_PAGE_SIZE`                                                                                  | `150`                          | `rowCount` per `searchHostOverride` page. 1 to 500.                                                                                                                                                                        |
 | `OPNSENSE_READ_ATTEMPTS`                                                                              | `3`                            | Full re-reads allowed when a paginated read is inconsistent. At least 1.                                                                                                                                                   |
-| `OPNSENSE_APPLY_WORKERS`                                                                              | `4`                            | Bounded concurrency across names inside one apply phase. 1 to 32.                                                                                                                                                          |
+| `OPNSENSE_APPLY_WORKERS`                                                                              | `1`                            | Goroutines converging names in one apply phase, 1 to 32. Orchestration only: firewall writes are always serialised, as OPNsense's config save is unsafe under concurrent writes (2026-09-15 cutover: 2 of 282 adds lost).  |
 | `OPNSENSE_RETRY_ATTEMPTS`                                                                             | `3`                            | 1 to 10. Retries are limited to idempotent calls and any 429.                                                                                                                                                              |
 | `OPNSENSE_RETRY_INITIAL_DELAY`                                                                        | `500ms`                        | At least 1ms. Backoff is `initial << attempt` with up to 50% jitter.                                                                                                                                                       |
 | `OPNSENSE_RETRY_MAX_DELAY`                                                                            | `10s`                          | Must be at least `OPNSENSE_RETRY_INITIAL_DELAY`.                                                                                                                                                                           |
@@ -235,6 +235,11 @@ Read, apply and reconfigure:
 - `externaldns_webhook_opnsense_delete_blocked_total{provider}`
 - `externaldns_webhook_opnsense_endpoints_dropped_total{provider,reason}`
 - `externaldns_webhook_opnsense_txt_invalid_total{provider}`
+- `externaldns_webhook_opnsense_lost_writes_total{provider,operation}` — writes
+  the firewall acknowledged that the re-read after the phase showed were not
+  saved; `operation` is `create`, `update` or `delete`
+- `externaldns_webhook_opnsense_verify_reads_failed_total{provider}` — verification
+  reads that failed, so that apply's writes went unverified
 
 Health of the whole loop:
 
@@ -244,7 +249,8 @@ Health of the whole loop:
 - `externaldns_webhook_info{version,provider}`
 
 Worth alerting on: `externaldns_webhook_opnsense_pending_reconfigure` stuck at
-1, any increase in `externaldns_webhook_opnsense_delete_blocked_total`, and
+1, any increase in `externaldns_webhook_opnsense_delete_blocked_total` or
+`externaldns_webhook_opnsense_lost_writes_total`, and
 `externaldns_webhook_last_success_timestamp` going stale.
 
 ## Development

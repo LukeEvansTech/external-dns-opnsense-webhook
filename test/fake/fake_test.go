@@ -397,3 +397,75 @@ func TestFake_ReconfigureDirect(t *testing.T) {
 		t.Errorf("listlocaldata = %v", data)
 	}
 }
+
+// TestFake_LostWriteFault proves each write endpoint's Lost mode answers
+// exactly as a successful call would while leaving the table as it was: an
+// add reports saved with a uuid that never appears, a set reports saved and
+// changes nothing, a delete reports deleted and removes nothing.
+func TestFake_LostWriteFault(t *testing.T) {
+	s := New(t)
+	add := map[string]any{"host": map[string]string{
+		"hostname": "x", "domain": "example.com", "rr": "A", "server": "192.0.2.9",
+	}}
+
+	s.Inject(Fault{Op: OpAddHostOverride, Lost: true, Times: 1})
+	got := postJSON(t, s.URL()+"/api/unbound/settings/addHostOverride", add)
+	if got["result"] != "saved" || got["uuid"] == "" || got["uuid"] == nil {
+		t.Fatalf("lost add answered %v, want saved with a uuid", got)
+	}
+	if len(s.Rows()) != 0 {
+		t.Fatalf("lost add saved a row: %+v", s.Rows())
+	}
+
+	got = postJSON(t, s.URL()+"/api/unbound/settings/addHostOverride", add)
+	id, _ := got["uuid"].(string)
+	if got["result"] != "saved" || id == "" || len(s.Rows()) != 1 {
+		t.Fatalf("plain add after the fault: %v rows=%d", got, len(s.Rows()))
+	}
+
+	s.Inject(Fault{Op: OpSet, Lost: true, Times: 1})
+	set := map[string]any{"host": map[string]string{
+		"hostname": "x", "domain": "example.com", "rr": "A", "server": "198.51.100.1",
+	}}
+	if got := postJSON(t, s.URL()+"/api/unbound/settings/setHostOverride/"+id, set); got["result"] != "saved" {
+		t.Fatalf("lost set answered %v, want saved", got)
+	}
+	if rows := s.Rows(); rows[0].Server != "192.0.2.9" {
+		t.Fatalf("lost set changed the row: %+v", rows[0])
+	}
+
+	delURL := s.URL() + "/api/unbound/settings/delHostOverride/" + id
+	s.Inject(Fault{Op: OpDel, Lost: true, Times: 1})
+	if got := postJSON(t, delURL, map[string]any{}); got["result"] != "deleted" {
+		t.Fatalf("lost delete answered %v, want deleted", got)
+	}
+	if len(s.Rows()) != 1 {
+		t.Fatalf("lost delete removed the row")
+	}
+	// The faults are spent: the next delete is real.
+	if got := postJSON(t, delURL, map[string]any{}); got["result"] != "deleted" || len(s.Rows()) != 0 {
+		t.Fatalf("delete after the fault: %v rows=%d", got, len(s.Rows()))
+	}
+	if s.Hits(OpAddHostOverride) != 2 || s.Hits(OpSet) != 1 || s.Hits(OpDel) != 2 {
+		t.Errorf("hits add=%d set=%d del=%d", s.Hits(OpAddHostOverride), s.Hits(OpSet), s.Hits(OpDel))
+	}
+}
+
+// TestFake_MaxInFlightWrites checks the counter reads zero before any write
+// and that sequential writes never overlap; the overlapping case is what the
+// provider's serialisation test relies on it to detect.
+func TestFake_MaxInFlightWrites(t *testing.T) {
+	s := New(t)
+	if got := s.MaxInFlightWrites(); got != 0 {
+		t.Fatalf("max in flight before any write = %d", got)
+	}
+	add := map[string]any{"host": map[string]string{
+		"hostname": "x", "domain": "example.com", "rr": "A", "server": "192.0.2.9",
+	}}
+	for range 3 {
+		postJSON(t, s.URL()+"/api/unbound/settings/addHostOverride", add)
+	}
+	if got := s.MaxInFlightWrites(); got != 1 {
+		t.Errorf("max in flight after sequential writes = %d, want 1", got)
+	}
+}

@@ -209,11 +209,20 @@ func TestIntegration_BatchTiming(t *testing.T) {
 		t.Fatal(err)
 	}
 	createDur := time.Since(start)
+	// "saved" from the firewall is not proof the row exists: on 2026-09-15 two
+	// of 282 acknowledged adds were missing from the table afterwards. Read
+	// it back and require every A and every registry TXT of the batch.
+	if missing := absentFrom(t, p, creates); len(missing) != 0 {
+		t.Fatalf("%d of %d created rows missing after the batch create: %v", len(missing), len(creates), missing)
+	}
 	start = time.Now()
 	if err := p.ApplyChanges(ctx, &plan.Changes{Delete: creates}); err != nil {
 		t.Fatal(err)
 	}
 	deleteDur := time.Since(start)
+	if left := len(creates) - len(absentFrom(t, p, creates)); left != 0 {
+		t.Fatalf("%d of %d rows still present after the batch delete", left, len(creates))
+	}
 	t.Logf("batch create=%s delete=%s (%d rows each way)", createDur, deleteDur, len(creates))
 	if createDur > 100*time.Second || deleteDur > 100*time.Second {
 		t.Errorf("batch too slow for the 120s apply budget: create=%s delete=%s", createDur, deleteDur)
@@ -253,6 +262,27 @@ func TestIntegration_AAAACanonicalisation(t *testing.T) {
 	if err := p.ApplyChanges(ctx, &plan.Changes{Delete: create.Create}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// absentFrom reads the table back and returns the "<type> <name>" of every
+// endpoint in eps that is not present as a record of that name and type.
+func absentFrom(t *testing.T, p *opnsense.Provider, eps []*endpoint.Endpoint) []string {
+	t.Helper()
+	records, err := p.Records(context.Background())
+	if err != nil {
+		t.Fatalf("Records: %v", err)
+	}
+	have := make(map[string]bool, len(records))
+	for _, r := range records {
+		have[r.RecordType+" "+r.DNSName] = true
+	}
+	var missing []string
+	for _, e := range eps {
+		if k := e.RecordType + " " + e.DNSName; !have[k] {
+			missing = append(missing, k)
+		}
+	}
+	return missing
 }
 
 func targetsFor(t *testing.T, p *opnsense.Provider, name, rrtype string) []string {

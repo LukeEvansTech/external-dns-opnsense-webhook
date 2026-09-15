@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/LukeEvansTech/external-dns-opnsense-webhook/internal/metrics"
@@ -64,6 +65,12 @@ var searchSort = map[string]string{"domain": sortAsc, "hostname": sortAsc, "rr":
 type Client struct {
 	cfg   *Config
 	httpc *http.Client
+	// writeMu serialises every mutating settings call. OPNsense's config
+	// save is load-modify-write with no lock around it, so two concurrent
+	// writes can each read the same table, each add its row, and the second
+	// save overwrites the first: the firewall answers both with "saved" and
+	// one row never exists. Reads and reconfigure are not held by it.
+	writeMu sync.Mutex
 }
 
 // NewClient builds a client; it performs no I/O.
@@ -229,6 +236,8 @@ func (c *Client) AddHostOverride(ctx context.Context, h hostFields) (string, err
 	if err != nil {
 		return "", &DataError{Operation: opAddHostOverride, Err: err}
 	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	var out writeResponse
 	if err := c.do(ctx, opAddHostOverride, http.MethodPost, pathAdd, body, &out, maxResponseBytes); err != nil {
 		return "", err
@@ -245,6 +254,8 @@ func (c *Client) SetHostOverride(ctx context.Context, id string, h hostFields) e
 	if err != nil {
 		return &DataError{Operation: opSetHostOverride, Err: err}
 	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	var out writeResponse
 	if err := c.do(ctx, opSetHostOverride, http.MethodPost, pathSet+id, body, &out, maxResponseBytes); err != nil {
 		return err
@@ -255,6 +266,8 @@ func (c *Client) SetHostOverride(ctx context.Context, id string, h hostFields) e
 // DelHostOverride deletes a row (and, on the firewall, its aliases). It
 // returns false when the row was already gone.
 func (c *Client) DelHostOverride(ctx context.Context, id string) (bool, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	var out writeResponse
 	if err := c.do(ctx, opDelHostOverride, http.MethodPost, pathDel+id, []byte("{}"), &out, maxResponseBytes); err != nil {
 		return false, err
