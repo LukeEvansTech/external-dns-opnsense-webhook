@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 (2026-09-15)
 
 - Every mutating OPNsense call (`addHostOverride`, `setHostOverride`, `delHostOverride`) now runs behind one client mutex, whatever `OPNSENSE_APPLY_WORKERS` is set to. OPNsense's config save is not safe under concurrent writes: during the 2026-09-15 cutover, 2 of 282 acknowledged adds were never saved. Concurrency across names is orchestration only; writes reach the firewall one at a time.
 - After each apply phase that wrote, the provider re-reads the table and checks every acknowledged write landed: created and updated rows are present and read as written, deleted rows are gone. The rows that did land are still reconfigured; if the verification read itself fails, that is logged and the apply carries on.
