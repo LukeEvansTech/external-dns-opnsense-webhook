@@ -131,11 +131,10 @@ to `OPNSENSE_APPLY_TIMEOUT` plus `OPNSENSE_RECONFIGURE_TIMEOUT` (165 s by
 default); `main` exits non-zero at startup if that sum exceeds
 `SERVER_WRITE_TIMEOUT`. Measured on the firewall on 2026-09-14 by the
 integration suite: a 282-row batch took 8.3 s to create and 7.7 s to delete
-(three runs within 1 s of each other) with four workers. Writes are now
-serialised (6.2), so a batch of that size takes roughly four times longer plus
-its verification reads; the 120 s apply budget still carries a margin of
-several times, to be re-measured by the integration suite before the next
-release. OPNsense stores an uncompressed IPv6 literal verbatim,
+(three runs within 1 s of each other) with four workers. With writes
+serialised (6.2) and the verification reads added, the same batch measured
+12.4 s to create and 11.4 s to delete on 2026-09-15, so the 120 s apply budget
+still carries close to a tenfold margin. OPNsense stores an uncompressed IPv6 literal verbatim,
 so A/AAAA targets are compared as written.
 
 Startup order: parse config, bind both listeners, then probe the firewall.
