@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 (2026-09-15)
 
 - Counter series with closed label sets (delete blocked, TXT invalid, pages fetched, read restarts, reconfigure by result, endpoints dropped by reason, changes by operation) now exist at zero from startup, so the first increment is a visible delta for `increase()` and the alert on blocked deletes fires on the first event.
 
