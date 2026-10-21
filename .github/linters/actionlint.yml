@@ -1,0 +1,12 @@
+---
+# actionlint 1.7.12 (the latest release, and the one super-linter bundles)
+# predates the ubuntu-26.04 GitHub-hosted image and rejects that label as
+# unknown. Listing it here is actionlint's documented way to add a runner
+# label. Remove this file once an actionlint release knows ubuntu-26.04.
+#
+# super-linter reads this path (.github/linters); .github/actionlint.yaml is
+# a symlink to it so the standalone actionlint in the lint-workflows task
+# reads the same rules.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
