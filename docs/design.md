@@ -483,7 +483,7 @@ credentials.
   (house gate: run the real image locally before pushing).
 - Renovate via `github>LukeEvansTech/renovate-config`. Digest pinning of the
   image in the consuming cluster is Renovate's job.
-- `AGENTS.md` carries the fleet Go conventions; `CLAUDE.md` imports it.
+- `AGENTS.md` carries the fleet Go conventions.
 
 ## 12. Risks and open items
 
